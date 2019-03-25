@@ -10,8 +10,8 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
 
-from dataset_utils import *
-from mnist_model import *
+from lib.dataset_utils import *
+from lib.mnist_model import *
 
 
 def evaluate(net, dataloader, criterion, device):
