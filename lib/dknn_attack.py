@@ -9,18 +9,17 @@ class DKNNAttack(object):
     """
     """
 
-    def __call__(self, dknn, x_orig, label, targeted=False,
-                 binary_search_steps=10, max_iterations=1000,
-                 confidence=0, learning_rate=1e-1,
-                 initial_const=1, abort_early=True):
+    def __call__(self, dknn, x_orig, label, guide_layer='relu1', m=100,
+                 binary_search_steps=5, max_iterations=500,
+                 learning_rate=1e-2, initial_const=1, abort_early=True):
         """
         x_orig is tensor (requires_grad=False)
         """
 
         min_, max_ = x_orig.max(), x_orig.min()
-        label = label.view(-1, 1)
         batch_size = x_orig.size(0)
         x_adv = x_orig.clone()
+        label = label.cpu().numpy()
 
         def to_attack_space(x):
             # map from [min_, max_] to [-1, +1]
@@ -60,11 +59,34 @@ class DKNNAttack(object):
         upper_bound = torch.zeros_like(const) + 1e9
         best_l2dist = torch.zeros_like(const) + 1e9
 
+        # find a set of guide neighbors
+        # guide_id = dknn.get_neighbors(x_orig, k=300, layers=guide_layer)[0][1]
+        # guide_label = torch.ne(dknn.y_train[guide_id],
+        # guide_sample=dknn.x_train[guide_id]
+        # with torch.no_grad():
+        #     guide_reps = dknn.get_activations(guide_sample)
+
+        with torch.no_grad():
+            # choose guide samples and get their representations
+            x_guide = self.find_guide_samples(
+                dknn, x_orig, label, k=m, layer=guide_layer)
+            guide_reps = {}
+            for i in range(batch_size):
+                guide_rep = dknn.get_activations(x_guide[i].cuda())
+                for layer in dknn.layers:
+                    if i == 0:
+                        # set a zero tensor before filling it
+                        size = (batch_size, ) + \
+                            guide_rep[layer].view(m, -1).size()
+                        guide_reps[layer] = torch.zeros(size).cuda()
+                    guide_reps[layer][i] = guide_rep[layer].view(
+                        m, -1).renorm(2, 0, 1)
+
         for binary_search_step in range(binary_search_steps):
-            if binary_search_step == binary_search_steps - 1 and \
-                    binary_search_steps >= 10:
-                # in the last binary search step, use the upper_bound instead
-                # TODO: find out why... it's not obvious why this is useful
+            if (binary_search_step == binary_search_steps - 1 and
+                    binary_search_steps >= 10):
+                    # in the last binary search step, use the upper_bound instead
+                    # TODO: find out why... it's not obvious why this is useful
                 const = upper_bound
 
             z_delta = torch.zeros_like(z_orig, requires_grad=True)
@@ -76,15 +98,11 @@ class DKNNAttack(object):
             for iteration in range(max_iterations):
                 optimizer.zero_grad()
                 x = to_model_space(z_orig + z_delta)
-                logits = net(x)
+                reps = dknn.get_activations(x)
                 loss, l2dist = self.loss_function(
-                    x, label, logits, targeted, const, x_recon, confidence)
+                    x, reps, guide_reps, dknn.layers, const, x_recon)
                 loss.backward()
                 optimizer.step()
-
-                with torch.no_grad():
-                    is_adv = self.check_adv(
-                        logits, label, targeted, confidence)
 
                 if iteration % (np.ceil(max_iterations / 10)) == 0:
                     print('    step: %d; loss: %.3f; l2dist: %.3f' %
@@ -97,15 +115,16 @@ class DKNNAttack(object):
                         break  # stop Adam if there has not been progress
                     loss_at_previous_check = loss
 
-                for i in range(batch_size):
-                    if is_adv[i]:
-                        # sucessfully find adv
-                        upper_bound[i] = const[i]
-                    else:
-                        # fail to find adv
-                        lower_bound[i] = const[i]
+            with torch.no_grad():
+                is_adv = self.check_adv(dknn, x, label)
 
             for i in range(batch_size):
+                # set new upper and lower bounds
+                if is_adv[i]:
+                    upper_bound[i] = const[i]
+                else:
+                    lower_bound[i] = const[i]
+                # set new const
                 if upper_bound[i] == 1e9:
                     # exponential search if adv has not been found
                     const[i] *= 10
@@ -118,36 +137,51 @@ class DKNNAttack(object):
                     best_l2dist[i] = l2dist[i]
 
             with torch.no_grad():
-                logits = net(x_adv)
-                is_adv = self.check_adv(logits, label, targeted, confidence)
+                is_adv = self.check_adv(dknn, x_adv, label)
             print('binary step: %d; number of successful adv: %d/%d' %
-                  (binary_search_step, is_adv.sum().cpu().numpy(), batch_size))
+                  (binary_search_step, is_adv.sum(), batch_size))
 
     @classmethod
-    def check_adv(cls, logits, label, targeted, confidence):
-        if targeted:
-            return torch.eq(torch.argmax(logits - confidence, 1),
-                            label.squeeze())
-        return torch.ne(torch.argmax(logits - confidence, 1), label.squeeze())
+    def check_adv(cls, dknn, x, label):
+        y_pred = dknn.classify(x).argmax(1)
+        return torch.tensor((y_pred != label).astype(np.float32)).cuda()
 
     @classmethod
-    def loss_function(cls, x, label, logits, targeted, const, x_recon,
-                      confidence):
+    def loss_function(cls, x, reps, guide_reps, layers, const, x_recon):
         """Returns the loss and the gradient of the loss w.r.t. x,
         assuming that logits = model(x)."""
 
-        other = cls.best_other_class(logits, label)
-        if targeted:
-            adv_loss = other - torch.gather(logits, 1, label)
-        else:
-            adv_loss = torch.gather(logits, 1, label) - other
-        adv_loss = torch.max(torch.zeros_like(adv_loss), adv_loss + confidence)
+        batch_size = x.size(0)
+        adv_loss = torch.zeros((batch_size, ), device=x.device)
+        for layer in layers:
+            # cosine distance
+            rep = reps[layer].view(batch_size, -1).renorm(2, 0, 1).unsqueeze(1)
+            adv_loss -= (rep * guide_reps[layer]).sum((1, 2))
 
-        size = x.size(1) * x.size(2) * x.size(3)
-        l2dist = torch.norm((x - x_recon).view(-1, size), dim=1)**2
-        total_loss = l2dist + const * adv_loss.squeeze()
+        l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
+        total_loss = l2dist + const * adv_loss
 
         return total_loss.mean(), l2dist.sqrt()
+
+    @staticmethod
+    def find_guide_samples(dknn, x, label, k=100, layer='relu1'):
+        """
+        find k nearest neighbors of the same class (not equal to y_Q) but
+        closest to Q
+        """
+        num_classes = dknn.num_classes
+        nn = torch.zeros((k, ) + x.size()).permute(1, 0, 2, 3, 4)
+        D, I = dknn.get_neighbors(x, k=dknn.x_train.size(0), layers=[layer])[0]
+
+        for i, (d, ind) in enumerate(zip(D, I)):
+            mean_dist = np.zeros((num_classes, ))
+            for j in range(num_classes):
+                mean_dist[j] = np.mean(
+                    d[np.where(dknn.y_train[ind] == j)[0]][:k])
+            mean_dist[label[i]] += 1e9
+            nearest_label = mean_dist.argmin()
+            nn[i] = dknn.x_train[dknn.y_train == nearest_label][:k]
+        return nn
 
     @staticmethod
     def best_other_class(logits, exclude):

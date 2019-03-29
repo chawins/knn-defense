@@ -29,6 +29,7 @@ class PGDAttack(object):
 
             for iteration in range(max_iterations):
                 x = torch.clamp(x_orig + delta, min_, max_)
+                # TODO: quick fix for vae
                 logits = net(x)
                 loss = self.loss_function(logits, label, targeted)
                 loss.backward()
@@ -56,10 +57,13 @@ class PGDAttack(object):
                     best_confidence[i] = confidence[i]
 
         with torch.no_grad():
+            # TODO:
             logits = net(x_adv)
             is_adv = self.check_adv(logits, label, targeted)
         print('number of successful adv: %d/%d' %
               (is_adv.sum().cpu().numpy(), batch_size))
+
+        return x_adv
 
     @classmethod
     def check_adv(cls, logits, label, targeted):
