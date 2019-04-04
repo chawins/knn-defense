@@ -11,15 +11,20 @@ class DKNNAttack(object):
 
     def __call__(self, dknn, x_orig, label, guide_layer='relu1', m=100,
                  binary_search_steps=5, max_iterations=500,
-                 learning_rate=1e-2, initial_const=1, abort_early=True):
+                 learning_rate=1e-2, initial_const=1, abort_early=True,
+                 max_linf=None):
         """
         x_orig is tensor (requires_grad=False)
         """
 
-        min_, max_ = x_orig.max(), x_orig.min()
+        min_, max_ = x_orig.min(), x_orig.max()
+        if max_linf is not None:
+            min_ = torch.max(x_orig - max_linf, min_)
+            max_ = torch.min(x_orig + max_linf, max_)
         batch_size = x_orig.size(0)
         x_adv = x_orig.clone()
         label = label.cpu().numpy()
+        device = dknn.device
 
         def to_attack_space(x):
             # map from [min_, max_] to [-1, +1]
@@ -53,7 +58,7 @@ class DKNNAttack(object):
         x_recon = to_model_space(z_orig)
 
         # declare tensors that keep track of constants and binary search
-        const = torch.zeros((batch_size, ), device=x_orig.device)
+        const = torch.zeros((batch_size, ), device=device)
         const += initial_const
         lower_bound = torch.zeros_like(const)
         upper_bound = torch.zeros_like(const) + 1e9
@@ -72,13 +77,13 @@ class DKNNAttack(object):
                 dknn, x_orig, label, k=m, layer=guide_layer)
             guide_reps = {}
             for i in range(batch_size):
-                guide_rep = dknn.get_activations(x_guide[i].cuda())
+                guide_rep = dknn.get_activations(x_guide[i])
                 for layer in dknn.layers:
                     if i == 0:
                         # set a zero tensor before filling it
                         size = (batch_size, ) + \
                             guide_rep[layer].view(m, -1).size()
-                        guide_reps[layer] = torch.zeros(size).cuda()
+                        guide_reps[layer] = torch.zeros(size).to(device)
                     guide_reps[layer][i] = guide_rep[layer].view(
                         m, -1).renorm(2, 0, 1)
 
@@ -90,7 +95,7 @@ class DKNNAttack(object):
                 const = upper_bound
 
             z_delta = torch.zeros_like(z_orig, requires_grad=True)
-            loss_at_previous_check = torch.zeros(1, device=x_orig.device) + 1e9
+            loss_at_previous_check = torch.zeros(1, device=device) + 1e9
 
             # create a new optimizer
             optimizer = optim.Adam([z_delta], lr=learning_rate)
@@ -100,7 +105,7 @@ class DKNNAttack(object):
                 x = to_model_space(z_orig + z_delta)
                 reps = dknn.get_activations(x)
                 loss, l2dist = self.loss_function(
-                    x, reps, guide_reps, dknn.layers, const, x_recon)
+                    x, reps, guide_reps, dknn.layers, const, x_recon, device)
                 loss.backward()
                 optimizer.step()
 
@@ -141,25 +146,36 @@ class DKNNAttack(object):
             print('binary step: %d; number of successful adv: %d/%d' %
                   (binary_search_step, is_adv.sum(), batch_size))
 
+        return x_adv
+
     @classmethod
     def check_adv(cls, dknn, x, label):
         y_pred = dknn.classify(x).argmax(1)
-        return torch.tensor((y_pred != label).astype(np.float32)).cuda()
+        return torch.tensor((y_pred != label).astype(np.float32)).to(dknn.device)
 
     @classmethod
-    def loss_function(cls, x, reps, guide_reps, layers, const, x_recon):
+    def loss_function(cls, x, reps, guide_reps, layers, const, x_recon, device):
         """Returns the loss and the gradient of the loss w.r.t. x,
         assuming that logits = model(x)."""
 
         batch_size = x.size(0)
-        adv_loss = torch.zeros((batch_size, ), device=x.device)
+        adv_loss = torch.zeros((batch_size, ), device=device)
         for layer in layers:
             # cosine distance
             rep = reps[layer].view(batch_size, -1).renorm(2, 0, 1).unsqueeze(1)
             adv_loss -= (rep * guide_reps[layer]).sum((1, 2))
+            # use sigmoid
+            # thres = torch.tensor([], device=device)
+            # a = 5
+            # adv_loss += cls.sigmoid(
+            #     2 * (- (rep * guide_reps[layer]).sum(2) - thres), a=a).sum(1)
+            # use soft version
+            # width = 1
+            # adv_loss -= torch.exp(
+            #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2)
 
         l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
-        total_loss = l2dist + const * adv_loss
+        total_loss = l2dist + const * adv_loss / len(layers)
 
         return total_loss.mean(), l2dist.sqrt()
 
@@ -196,3 +212,7 @@ class DKNNAttack(object):
     @staticmethod
     def atanh(x):
         return 0.5 * torch.log((1 + x) / (1 - x))
+
+    @staticmethod
+    def sigmoid(x, a=1):
+        return 1 / (1 + torch.exp(-a * x))

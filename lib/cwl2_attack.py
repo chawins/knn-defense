@@ -97,13 +97,13 @@ class CWL2Attack(object):
                         break  # stop Adam if there has not been progress
                     loss_at_previous_check = loss
 
-                for i in range(batch_size):
-                    if is_adv[i]:
-                        # sucessfully find adv
-                        upper_bound[i] = const[i]
-                    else:
-                        # fail to find adv
-                        lower_bound[i] = const[i]
+            for i in range(batch_size):
+                if is_adv[i]:
+                    # sucessfully find adv
+                    upper_bound[i] = const[i]
+                else:
+                    # fail to find adv
+                    lower_bound[i] = const[i]
 
             for i in range(batch_size):
                 if upper_bound[i] == 1e9:
@@ -122,6 +122,8 @@ class CWL2Attack(object):
                 is_adv = self.check_adv(logits, label, targeted, confidence)
             print('binary step: %d; number of successful adv: %d/%d' %
                   (binary_search_step, is_adv.sum().cpu().numpy(), batch_size))
+
+        return x_adv
 
     @classmethod
     def check_adv(cls, logits, label, targeted, confidence):
