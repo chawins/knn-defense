@@ -48,7 +48,7 @@ def train(net, trainloader, validloader, optimizer, epoch, device,
 
     val_loss = evaluate(net, validloader, device)
 
-    log.info(' %5d | %.4f, %.4f', epoch, train_loss / train_total)
+    log.info(' %5d | %.4f | %.4f', epoch, train_loss / train_total, val_loss)
 
     # Save model weights
     # if not save_best_only or (save_best_only and val_acc > best_acc):
@@ -67,8 +67,10 @@ def loss_function(x, en_mu, en_logvar, out):
     # elbo
     # normal = Normal(de_mu, torch.exp(0.5 * de_logvar))
     # logprob = - torch.sum(normal.log_prob(x)) / (np.log(2) * 784)
-    logprob = - torch.sum(x * torch.log(out) + (1 - x)
-                          * torch.log(1 - out)) / (np.log(2) * 784)
+    # logprob = - torch.sum(x * torch.log(out) + (1 - x)
+    #                       * torch.log(1 - out)) / (np.log(2) * 784)
+    logprob = F.binary_cross_entropy(
+        out, x, reduction='sum') / (np.log(2) * 784)
     kld = -0.5 * torch.sum(
         1 + en_logvar - en_mu.pow(2) - en_logvar.exp()) / (np.log(2) * 784)
 
@@ -81,7 +83,7 @@ def loss_function(x, en_mu, en_logvar, out):
 def main():
 
     # Set experiment id
-    exp_id = 0
+    exp_id = 4
     model_name = 'train_mnist_vae_exp%d' % exp_id
 
     # Training parameters
@@ -133,7 +135,8 @@ def main():
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    net = VAE((1, 28, 28), num_classes=10, latent_dim=20)
+    # net = VAE((1, 28, 28), num_classes=10, latent_dim=20)
+    net = VAE2((1, 28, 28), num_classes=10, latent_dim=2000)
     net = net.to(device)
     if device == 'cuda':
         net = torch.nn.DataParallel(net)
@@ -141,7 +144,7 @@ def main():
 
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
 
-    log.info(' epoch | loss  , acc    | val_loss, val_acc')
+    log.info(' epoch | loss')
     best_loss = np.inf
     for epoch in range(epochs):
         best_loss = train(net, trainloader, validloader, optimizer,
@@ -152,8 +155,8 @@ def main():
             out = net.module.decode(z)
             torchvision.utils.save_image(out, 'epoch%d.png' % epoch, 10)
 
-    test_loss, test_acc = evaluate(net, testloader, device)
-    log.info('Test loss: %.4f, Test acc: %.4f', test_loss, test_acc)
+    test_loss = evaluate(net, testloader, device)
+    log.info('Test loss: %.4f', test_loss)
 
 
 if __name__ == '__main__':

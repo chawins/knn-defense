@@ -2,6 +2,7 @@ import logging
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 
 
@@ -84,8 +85,8 @@ class DKNNAttack(object):
                         size = (batch_size, ) + \
                             guide_rep[layer].view(m, -1).size()
                         guide_reps[layer] = torch.zeros(size).to(device)
-                    guide_reps[layer][i] = guide_rep[layer].view(
-                        m, -1).renorm(2, 0, 1)
+                    guide_reps[layer][i] = F.normalize(
+                        guide_rep[layer].view(m, -1), 2, 1)
 
         for binary_search_step in range(binary_search_steps):
             if (binary_search_step == binary_search_steps - 1 and
@@ -122,6 +123,7 @@ class DKNNAttack(object):
 
             with torch.no_grad():
                 is_adv = self.check_adv(dknn, x, label)
+                print(is_adv.sum())
 
             for i in range(batch_size):
                 # set new upper and lower bounds
@@ -159,23 +161,40 @@ class DKNNAttack(object):
         assuming that logits = model(x)."""
 
         batch_size = x.size(0)
-        adv_loss = torch.zeros((batch_size, ), device=device)
-        for layer in layers:
+        adv_loss = torch.zeros((batch_size, len(layers)), device=device)
+        for l, layer in enumerate(layers):
             # cosine distance
-            rep = reps[layer].view(batch_size, -1).renorm(2, 0, 1).unsqueeze(1)
-            adv_loss -= (rep * guide_reps[layer]).sum((1, 2))
-            # use sigmoid
-            # thres = torch.tensor([], device=device)
-            # a = 5
-            # adv_loss += cls.sigmoid(
-            #     2 * (- (rep * guide_reps[layer]).sum(2) - thres), a=a).sum(1)
-            # use soft version
-            # width = 1
-            # adv_loss -= torch.exp(
-            #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2)
+            rep = F.normalize(reps[layer].view(
+                batch_size, -1), 2, 1).unsqueeze(1)
+            # (1) directly minimize loss
+            # adv_loss[:, l] = (rep * guide_reps[layer]).sum((1, 2))
+
+            # (2) use sigmoid
+            # this threshold is calculated with k = 75 on basic model
+            # thres = torch.tensor(
+            #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
+            # thres = torch.tensor([0.7105], device=device)
+            # a = 4
+            # adv_loss[:, l] = cls.sigmoid(
+            #     (rep * guide_reps[layer]).sum(2) - thres[l], a=a).sum(1)
+
+            # (3) use soft version
+            width = 1
+            # adv_loss[:, l] = torch.log(torch.exp(
+            #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2).sum(1))
+            adv_loss[:, l] = torch.log(torch.exp(
+                (rep * guide_reps[layer]).sum(2) / width**2).sum(1))
+
+            # (4) use max instead of sigmoid
+            # thres = torch.tensor(
+            #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
+            # thres = torch.tensor([0.7105], device=device)
+            # zero = torch.tensor(0.).to(device)
+            # adv_loss[:, l] = - torch.max(
+            #     thres[l] - (rep * guide_reps[layer]).sum(2), zero).sum(1)
 
         l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
-        total_loss = l2dist + const * adv_loss / len(layers)
+        total_loss = l2dist - const * adv_loss.mean(1)
 
         return total_loss.mean(), l2dist.sqrt()
 
@@ -187,16 +206,22 @@ class DKNNAttack(object):
         """
         num_classes = dknn.num_classes
         nn = torch.zeros((k, ) + x.size()).permute(1, 0, 2, 3, 4)
-        D, I = dknn.get_neighbors(x, k=dknn.x_train.size(0), layers=[layer])[0]
+        D, I = dknn.get_neighbors(
+            x, k=dknn.x_train.size(0), layers=[layer])[0]
 
         for i, (d, ind) in enumerate(zip(D, I)):
             mean_dist = np.zeros((num_classes, ))
             for j in range(num_classes):
                 mean_dist[j] = np.mean(
                     d[np.where(dknn.y_train[ind] == j)[0]][:k])
-            mean_dist[label[i]] += 1e9
-            nearest_label = mean_dist.argmin()
-            nn[i] = dknn.x_train[dknn.y_train == nearest_label][:k]
+            # TODO: this may depend on the index used
+            # mean_dist[label[i]] += 1e9
+            # nearest_label = mean_dist.argmin()
+            mean_dist[label[i]] -= 1e9
+            nearest_label = mean_dist.argmax()
+            nn_ind = np.where(dknn.y_train[ind] == nearest_label)[0][:k]
+            nn[i] = dknn.x_train[ind[nn_ind]]
+
         return nn
 
     @staticmethod

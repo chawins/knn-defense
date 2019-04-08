@@ -102,6 +102,7 @@ def load_mnist_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
 def load_cifar10(batch_size,
                  data_dir='./data',
                  val_size=0.1,
+                 normalize=True,
                  augment=True,
                  shuffle=True,
                  seed=1):
@@ -112,8 +113,7 @@ def load_cifar10(batch_size,
     num_workers = 4
 
     transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
+        transforms.ToTensor()
     ])
 
     if augment:
@@ -123,11 +123,20 @@ def load_cifar10(batch_size,
             transforms.RandomAffine(
                 5, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=5),
             transforms.ColorJitter(brightness=0.1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            transforms.ToTensor()
         ])
     else:
         transform_train = transform
+
+    if normalize:
+        transform = transforms.Compose([
+            transform,
+            transforms.Normalize(mean, std)
+        ])
+        transform_train = transforms.Compose([
+            transform_train,
+            transforms.Normalize(mean, std)
+        ])
 
     trainset = torchvision.datasets.CIFAR10(
         root=data_dir, train=True, download=True, transform=transform_train)
@@ -159,6 +168,47 @@ def load_cifar10(batch_size,
         testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return trainloader, validloader, testloader
+
+
+def load_cifar10_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
+    """Load entire CIFAR-10 dataset into tensor"""
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    trainset = torchvision.datasets.CIFAR10(
+        root=data_dir, train=True, download=True, transform=transform)
+    validset = torchvision.datasets.CIFAR10(
+        root=data_dir, train=True, download=True, transform=transform)
+    testset = torchvision.datasets.CIFAR10(
+        root=data_dir, train=False, download=True, transform=transform)
+
+    # Random split train and validation sets
+    num_train = len(trainset)
+    indices = list(range(num_train))
+    split = int(np.floor(val_size * num_train))
+
+    if shuffle:
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+
+    train_idx, valid_idx = indices[split:], indices[:split]
+    train_sampler = SubsetRandomSampler(train_idx)
+    valid_sampler = SubsetRandomSampler(valid_idx)
+
+    trainloader = torch.utils.data.DataLoader(
+        trainset, batch_size=(num_train - split), sampler=train_sampler)
+    validloader = torch.utils.data.DataLoader(
+        validset, batch_size=split, sampler=valid_sampler)
+    testloader = torch.utils.data.DataLoader(
+        testset, batch_size=len(testset), shuffle=False)
+
+    x_train = next(iter(trainloader))
+    x_valid = next(iter(validloader))
+    x_test = next(iter(testloader))
+
+    return x_train, x_valid, x_test
 
 
 def load_gtsrb(data_dir='./data', gray=False, train_file_name=None):

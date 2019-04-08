@@ -72,9 +72,10 @@ class DKNN(object):
         reps = self.get_activations(x_train)
 
         for layer in layers:
-            rep = reps[layer].cpu().view(x_train.size(0), -1)
+            rep = F.normalize(reps[layer].cpu().view(
+                x_train.size(0), -1), 2, 1)
             # normalize activations so inner product is cosine similarity
-            index = self._build_index(rep.renorm(2, 0, 1))
+            index = self._build_index(rep)
             self.indices.append(index)
 
         # set up calibration for credibility score
@@ -96,14 +97,14 @@ class DKNN(object):
         # index = faiss.GpuIndexFlatIP(res, d)
 
         # brute-force
-        # index = faiss.IndexFlatIP(d)
+        index = faiss.IndexFlatIP(d)
 
         # quantizer = faiss.IndexFlatL2(d)
         # index = faiss.IndexIVFFlat(quantizer, d, 100)
         # index.train(xb.cpu().numpy())
 
         # locality-sensitive hash
-        index = faiss.IndexLSH(d, 256)
+        # index = faiss.IndexLSH(d, 256)
 
         index.add(xb.detach().cpu().numpy())
         return index
@@ -121,8 +122,8 @@ class DKNN(object):
         reps = self.get_activations(x)
         for layer, index in zip(self.layers, self.indices):
             if layer in layers:
-                rep = reps[layer].renorm(2, 0, 1)
-                rep = rep.detach().cpu().numpy().reshape(x.size(0), -1)
+                rep = F.normalize(reps[layer].view(x.size(0), -1), 2, 1)
+                rep = rep.detach().cpu().numpy()
                 D, I = index.search(rep, k)
                 # D, I = search_index_pytorch(index, reps[layer], k)
                 # uncomment when using GPU
@@ -221,6 +222,109 @@ class ClassAuxVAE(nn.Module):
         de_mu, de_logvar = self.decode(z)
         y = self.auxilary(z)
         return en_mu, en_logvar, de_mu, de_logvar, y
+
+
+class VAE2(nn.Module):
+
+    def __init__(self, input_dim, num_classes=10, latent_dim=20):
+        super(VAE2, self).__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.input_dim_flat = 1
+        for dim in input_dim:
+            self.input_dim_flat *= dim
+        self.en_conv1 = nn.Conv2d(1, 64, kernel_size=8, stride=2, padding=3)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.en_conv2 = nn.Conv2d(64, 128, kernel_size=6, stride=2, padding=3)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.en_conv3 = nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=0)
+        # self.relu3 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU()
+        self.en_fc1 = nn.Linear(2048, 400)
+        self.relu4 = nn.ReLU(inplace=True)
+        self.en_mu = nn.Linear(400, latent_dim)
+        self.en_logvar = nn.Linear(400, latent_dim)
+
+        self.de_fc1 = nn.Linear(latent_dim, 400)
+        self.de_relu1 = nn.ReLU(inplace=True)
+        self.de_fc2 = nn.Linear(400, self.input_dim_flat)
+
+    def encode(self, x):
+        x = self.relu1(self.en_conv1(x))
+        x = self.relu2(self.en_conv2(x))
+        x = self.relu3(self.en_conv3(x))
+        x = x.view(x.size(0), -1)
+        x = self.relu4(self.en_fc1(x))
+        en_mu = self.en_mu(x)
+        # TODO: use tanh activation on logvar if unstable
+        # en_std = torch.exp(0.5 * x[:, self.latent_dim:])
+        en_logvar = self.en_logvar(x)
+        return en_mu, en_logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        x = self.de_relu1(self.de_fc1(z))
+        x = self.de_fc2(x)
+        out_dim = (z.size(0), ) + self.input_dim
+        return x.view(out_dim).sigmoid()
+
+    def forward(self, x):
+        en_mu, en_logvar = self.encode(x)
+        z = self.reparameterize(en_mu, en_logvar)
+        output = self.decode(z)
+        return en_mu, en_logvar, output
+
+
+class VAE(nn.Module):
+
+    def __init__(self, input_dim, num_classes=10, latent_dim=20):
+        super(VAE, self).__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.input_dim_flat = 1
+        for dim in input_dim:
+            self.input_dim_flat *= dim
+        self.en_fc1 = nn.Linear(self.input_dim_flat, 400)
+        self.en_relu1 = nn.ReLU(inplace=True)
+        self.en_fc2 = nn.Linear(400, 400)
+        self.en_relu2 = nn.ReLU(inplace=True)
+        self.en_mu = nn.Linear(400, latent_dim)
+        self.en_logvar = nn.Linear(400, latent_dim)
+
+        self.de_fc1 = nn.Linear(latent_dim, 400)
+        self.de_relu1 = nn.ReLU(inplace=True)
+        self.de_fc2 = nn.Linear(400, self.input_dim_flat)
+
+    def encode(self, x):
+        x = x.view(-1, self.input_dim_flat)
+        x = self.en_relu1(self.en_fc1(x))
+        x = self.en_relu2(self.en_fc2(x))
+        en_mu = self.en_mu(x)
+        # TODO: use tanh activation on logvar if unstable
+        # en_std = torch.exp(0.5 * x[:, self.latent_dim:])
+        en_logvar = self.en_logvar(x)
+        return en_mu, en_logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        x = self.de_relu1(self.de_fc1(z))
+        x = self.de_fc2(x)
+        out_dim = (z.size(0), ) + self.input_dim
+        return x.view(out_dim).sigmoid()
+
+    def forward(self, x):
+        en_mu, en_logvar = self.encode(x)
+        z = self.reparameterize(en_mu, en_logvar)
+        output = self.decode(z)
+        return en_mu, en_logvar, output
 
 
 class SNNLModel(nn.Module):
