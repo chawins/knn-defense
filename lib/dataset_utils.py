@@ -12,6 +12,8 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data.sampler import SubsetRandomSampler
 
+from sklearn.model_selection import train_test_split
+
 
 def load_mnist(batch_size,
                data_dir='./data',
@@ -22,36 +24,16 @@ def load_mnist(batch_size,
 
     num_workers = 4
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
+    (x_train, y_train), (x_valid, y_valid), (x_test, y_test) = load_mnist_all(
+        data_dir=data_dir, val_size=val_size, shuffle=shuffle, seed=seed)
 
-    trainset = torchvision.datasets.MNIST(
-        root=data_dir, train=True, download=True, transform=transform)
-    validset = torchvision.datasets.MNIST(
-        root=data_dir, train=True, download=True, transform=transform)
-    testset = torchvision.datasets.MNIST(
-        root=data_dir, train=False, download=True, transform=transform)
-
-    # Random split train and validation sets
-    num_train = len(trainset)
-    indices = list(range(num_train))
-    split = int(np.floor(val_size * num_train))
-
-    if shuffle:
-        np.random.seed(seed)
-        np.random.shuffle(indices)
-
-    train_idx, valid_idx = indices[split:], indices[:split]
-    train_sampler = SubsetRandomSampler(train_idx)
-    valid_sampler = SubsetRandomSampler(valid_idx)
-
+    trainset = torch.utils.data.TensorDataset(x_train, y_train)
+    validset = torch.utils.data.TensorDataset(x_valid, y_valid)
+    testset = torch.utils.data.TensorDataset(x_test, y_test)
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, sampler=train_sampler,
-        num_workers=num_workers)
+        trainset, batch_size=batch_size, num_workers=num_workers)
     validloader = torch.utils.data.DataLoader(
-        validset, batch_size=batch_size, sampler=valid_sampler,
-        num_workers=num_workers)
+        validset, batch_size=batch_size, num_workers=num_workers)
     testloader = torch.utils.data.DataLoader(
         testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
@@ -67,36 +49,23 @@ def load_mnist_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
 
     trainset = torchvision.datasets.MNIST(
         root=data_dir, train=True, download=True, transform=transform)
-    validset = torchvision.datasets.MNIST(
-        root=data_dir, train=True, download=True, transform=transform)
     testset = torchvision.datasets.MNIST(
         root=data_dir, train=False, download=True, transform=transform)
 
-    # Random split train and validation sets
-    num_train = len(trainset)
-    indices = list(range(num_train))
-    split = int(np.floor(val_size * num_train))
-
-    if shuffle:
-        np.random.seed(seed)
-        np.random.shuffle(indices)
-
-    train_idx, valid_idx = indices[split:], indices[:split]
-    train_sampler = SubsetRandomSampler(train_idx)
-    valid_sampler = SubsetRandomSampler(valid_idx)
-
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=(num_train - split), sampler=train_sampler)
-    validloader = torch.utils.data.DataLoader(
-        validset, batch_size=split, sampler=valid_sampler)
+        trainset, batch_size=len(trainset), shuffle=False)
     testloader = torch.utils.data.DataLoader(
         testset, batch_size=len(testset), shuffle=False)
 
-    x_train = next(iter(trainloader))
-    x_valid = next(iter(validloader))
-    x_test = next(iter(testloader))
+    x, y = next(iter(trainloader))
+    x_test, y_test = next(iter(testloader))
 
-    return x_train, x_valid, x_test
+    x_train, x_valid, y_train, y_valid = train_test_split(
+        x.numpy(), y.numpy(), test_size=val_size, shuffle=shuffle,
+        random_state=seed, stratify=y)
+
+    return ((torch.tensor(x_train), torch.tensor(y_train)),
+            (torch.tensor(x_valid), torch.tensor(y_valid)), (x_test, y_test))
 
 
 def load_cifar10(batch_size,

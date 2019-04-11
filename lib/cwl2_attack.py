@@ -82,10 +82,6 @@ class CWL2Attack(object):
                 loss.backward()
                 optimizer.step()
 
-                with torch.no_grad():
-                    is_adv = self.check_adv(
-                        logits, label, targeted, confidence)
-
                 if iteration % (np.ceil(max_iterations / 10)) == 0:
                     print('    step: %d; loss: %.3f; l2dist: %.3f' %
                           (iteration, loss.cpu().detach().numpy(),
@@ -96,6 +92,10 @@ class CWL2Attack(object):
                     if torch.gt(loss, .9999 * loss_at_previous_check):
                         break  # stop Adam if there has not been progress
                     loss_at_previous_check = loss
+
+            with torch.no_grad():
+                is_adv = self.check_adv(
+                    logits, label, targeted, confidence)
 
             for i in range(batch_size):
                 if is_adv[i]:
