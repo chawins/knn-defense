@@ -16,8 +16,8 @@ from lib.dknn import DKNN
 from lib.dknn_attack import DKNNAttack, SoftDKNNAttack
 from lib.mnist_model import *
 
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 exp_id = 0
 
@@ -81,6 +81,7 @@ def attack_batch(x, y, batch_size):
     total_num = x.size(0)
     num_batches = total_num // batch_size
     for i in range(num_batches):
+        print(i)
         begin = i * batch_size
         end = (i + 1) * batch_size
         x_a[begin:end] = attack(
@@ -91,4 +92,14 @@ def attack_batch(x, y, batch_size):
     return x_a
 
 
-x_adv = attack_batch(x_test[:1000].cuda(), y_test[:1000].cuda(), 100)
+x_adv = attack_batch(x_test[:500].cuda(), y_test[:500].cuda(), 100)
+
+y_pred = dknn.classify(x_adv)
+print((y_pred.argmax(1) == y_test[:500].numpy()).sum() / len(y_pred))
+
+y_clean = dknn.classify(x_test[:500])
+ind = (y_clean.argmax(1) == y_test[:500].numpy()) & (
+    y_pred.argmax(1) != y_test[:500].numpy())
+dist = np.mean(np.sqrt(np.sum((x_adv.cpu().detach().numpy()[ind] -
+                               x_test.numpy()[:500][ind])**2, (1, 2, 3))))
+print(dist)

@@ -9,33 +9,45 @@ class PGDAttack(object):
     """
     """
 
-    def __call__(self, net, x_orig, label, targeted=False,
-                 epsilon=0.1, max_epsilon=0.3, max_iterations=1000,
-                 random_restart=1):
+    def __call__(self, net, x_orig, label, targeted=False, epsilon=0.1,
+                 max_epsilon=0.3, max_iterations=1000, num_restart=1,
+                 rand_start=True):
         """
         x_orig is tensor (requires_grad=False)
         """
 
+        # make sure we run at least once
+        if num_restart < 1:
+            num_restart = 1
+
+        # if not using randomized start, no point in doing more than one start
+        if not rand_start:
+            num_restart = 1
+
         label = label.view(-1, 1)
         batch_size = x_orig.size(0)
         min_, max_ = x_orig.min(), x_orig.max()
-        x_adv = x_orig.clone()
+        x_adv = x_orig.detach()
 
-        for i in range(random_restart):
+        for i in range(num_restart):
 
-            delta = torch.zeros_like(x_adv, requires_grad=True)
+            # initialize perturbation
+            delta = torch.zeros_like(x_adv)
+            if rand_start:
+                delta.uniform_(- max_epsilon, max_epsilon)
+            delta.requires_grad_()
+
             best_confidence = torch.zeros(
                 (batch_size, ), device=x_orig.device) - 1e9
 
-            for iteration in range(max_iterations):
+            for _ in range(max_iterations):
                 x = torch.clamp(x_orig + delta, min_, max_)
-                # TODO: quick fix for vae
                 logits = net(x)
                 loss = self.loss_function(logits, label, targeted)
                 loss.backward()
                 # perform update on delta
                 with torch.no_grad():
-                    delta -= epsilon * delta.grad.sign()
+                    delta -= epsilon * delta.grad.detach().sign()
                     delta.clamp_(- max_epsilon, max_epsilon)
 
             with torch.no_grad():
@@ -57,7 +69,6 @@ class PGDAttack(object):
                     best_confidence[i] = confidence[i]
 
         with torch.no_grad():
-            # TODO:
             logits = net(x_adv)
             is_adv = self.check_adv(logits, label, targeted)
         print('number of successful adv: %d/%d' %
