@@ -212,7 +212,11 @@ class DKNNL2(object):
         index.add(xb.detach().cpu().numpy())
         return index
 
-    def get_activations(self, x, batch_size=500, requires_grad=True):
+    def get_activations(self, x, batch_size=500, requires_grad=True,
+                        device=None):
+
+        if device is None:
+            device = self.device
 
         with torch.no_grad():
             num_total = x.size(0)
@@ -223,7 +227,7 @@ class DKNNL2(object):
                 size = self.activations[layer].size()
                 activations[layer] = torch.empty((num_total, ) + size[1:],
                                                  dtype=torch.float32,
-                                                 device=self.device,
+                                                 device=device,
                                                  requires_grad=False)
 
         with torch.set_grad_enabled(requires_grad):

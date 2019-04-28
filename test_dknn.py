@@ -12,17 +12,19 @@ import torch.optim as optim
 import foolbox
 from lib.cwl2_attack import CWL2Attack
 from lib.dataset_utils import *
-from lib.dknn import DKNN
+from lib.dknn import DKNN, DKNNL2
 from lib.dknn_attack import DKNNAttack, SoftDKNNAttack
+from lib.knn import *
+from lib.lip_model import *
 from lib.mnist_model import *
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 exp_id = 0
 
-model_name = 'train_mnist_exp%d.h5' % exp_id
-net = BasicModel()
+# model_name = 'train_mnist_exp%d.h5' % exp_id
+# net = BasicModel()
 
 # model_name = 'train_mnist_snnl_exp%d.h5' % exp_id
 # net = SNNLModel(train_it=True)
@@ -36,6 +38,19 @@ net = BasicModel()
 
 # model_name = 'train_mnist_cav_exp%d.h5' % exp_id
 # net = ClassAuxVAE((1, 28, 28), num_classes=10, latent_dim=20)
+
+# model_name = 'dist_mnist_exp%d.h5' % exp_id
+# init_it = 1
+# train_it = False
+# net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+
+model_name = 'lipae_mnist_exp%d.h5' % exp_id
+init_it = 1e-2
+train_it = False
+latent_dim = 20
+alpha = 1e2
+net = NCA_AE(latent_dim=latent_dim, init_it=init_it,
+             train_it=train_it, alpha=alpha)
 
 # Set all random seeds
 seed = 2019
@@ -51,11 +66,11 @@ if not os.path.isdir(save_dir):
 model_path = os.path.join(save_dir, model_name)
 
 net = net.to(device)
-if device == 'cuda':
-    net = torch.nn.DataParallel(net)
-    cudnn.benchmark = True
+# if device == 'cuda':
+#     net = torch.nn.DataParallel(net)
+#     cudnn.benchmark = True
 net.load_state_dict(torch.load(model_path))
-net = net.module
+# net = net.module
 net.eval()
 
 (x_train, y_train), (x_valid, y_valid), (x_test, y_test) = load_mnist_all(
@@ -63,43 +78,73 @@ net.eval()
 
 # layers = ['relu1', 'relu2', 'relu3', 'fc']
 # layers = ['relu1', 'relu2', 'relu3']
-layers = ['relu3']
+# layers = ['relu3']
 # layers = ['en_conv3']
 # layers = ['en_mu']
 # net = net.cpu()
-with torch.no_grad():
-    dknn = DKNN(net, x_train.cuda(), y_train, x_valid.cuda(), y_valid, layers,
-                k=75, num_classes=10)
-    y_pred = dknn.classify(x_test)
 
+# dknn = DKNNL2(net, x_train, y_train, x_valid, y_valid, layers,
+#               k=1, num_classes=10)
 
-attack = SoftDKNNAttack()
+# attack = SoftDKNNAttack()
+#
+#
+# def attack_batch(x, y, batch_size):
+#     x_a = torch.zeros_like(x)
+#     total_num = x.size(0)
+#     num_batches = total_num // batch_size
+#     for i in range(num_batches):
+#         print(i)
+#         begin = i * batch_size
+#         end = (i + 1) * batch_size
+#         x_a[begin:end] = attack(
+#             dknn, x[begin:end], y[begin:end],
+#             layer=layers[0], m=100, binary_search_steps=5,
+#             max_iterations=500, learning_rate=1e-1,
+#             initial_const=1, abort_early=True)
+#     return x_a
+#
+#
+# x_adv = attack_batch(x_test[:500].cuda(), y_test[:500].cuda(), 100)
+#
+# y_pred = dknn.classify(x_adv)
+# print((y_pred.argmax(1) == y_test[:500].numpy()).sum() / len(y_pred))
+#
+# y_clean = dknn.classify(x_test[:500])
+# ind = (y_clean.argmax(1) == y_test[:500].numpy()) & (
+#     y_pred.argmax(1) != y_test[:500].numpy())
+# dist = np.mean(np.sqrt(np.sum((x_adv.cpu().detach().numpy()[ind] -
+#                                x_test.numpy()[:500][ind])**2, (1, 2, 3))))
+# print(dist)
 
+layers = ['relu1', 'relu2', 'relu3', 'fc']
 
-def attack_batch(x, y, batch_size):
-    x_a = torch.zeros_like(x)
-    total_num = x.size(0)
-    num_batches = total_num // batch_size
-    for i in range(num_batches):
-        print(i)
-        begin = i * batch_size
-        end = (i + 1) * batch_size
-        x_a[begin:end] = attack(
-            dknn, x[begin:end], y[begin:end],
-            layer=layers[0], m=100, binary_search_steps=5,
-            max_iterations=500, learning_rate=1e-1,
-            initial_const=1, abort_early=True)
-    return x_a
+for layer in layers:
+    print(layer)
+    dknn = DKNNL2(net, x_train, y_train, x_valid, y_valid, [layer],
+                  k=1, num_classes=10)
 
+    with torch.no_grad():
+        y_pred = dknn.classify(x_test)
+        print((y_pred.argmax(1) == y_test.numpy()).sum() / y_test.size(0))
 
-x_adv = attack_batch(x_test[:500].cuda(), y_test[:500].cuda(), 100)
+    rep_train = dknn.get_activations(
+        x_train, requires_grad=False, device='cpu')[layer]
+    rep_test = dknn.get_activations(
+        x_test, requires_grad=False, device='cpu')[layer]
+    rep_valid = dknn.get_activations(
+        x_valid, requires_grad=False, device='cpu')[layer]
 
-y_pred = dknn.classify(x_adv)
-print((y_pred.argmax(1) == y_test[:500].numpy()).sum() / len(y_pred))
+    knn = KNNL2(rep_train, y_train, rep_valid, y_valid, k=1, num_classes=10)
 
-y_clean = dknn.classify(x_test[:500])
-ind = (y_clean.argmax(1) == y_test[:500].numpy()) & (
-    y_pred.argmax(1) != y_test[:500].numpy())
-dist = np.mean(np.sqrt(np.sum((x_adv.cpu().detach().numpy()[ind] -
-                               x_test.numpy()[:500][ind])**2, (1, 2, 3))))
-print(dist)
+    rep_nn = knn.find_nn_diff_class(rep_test, y_test)
+    rep_adv = knn.get_min_dist(rep_test, y_test, rep_nn, iterations=10)
+
+    dist = ((rep_test - rep_nn)**2).view(rep_test.size(0), -1).sum(1).sqrt()
+    print(dist.mean().item())
+
+    perts = [1, 2, 3]
+    a = []
+    for pert in perts:
+        a.append((dist.cpu().detach().numpy() > pert).mean())
+    print(a)

@@ -7,19 +7,20 @@ import torch.backends.cudnn as cudnn
 from lib.adv_model import *
 from lib.dataset_utils import *
 from lib.dknn import DKNN, DKNNL2
+from lib.lip_model import *
 from lib.mnist_model import *
 from lib.utils import *
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-exp_id = 8
+exp_id = 11
 
 # model_name = 'train_mnist_exp%d.h5' % exp_id
 # net = BasicModel()
 
-model_name = 'train_mnist_snnl_exp%d.h5' % exp_id
-net = SNNLModel(train_it=True)
+# model_name = 'train_mnist_snnl_exp%d.h5' % exp_id
+# net = SNNLModel(train_it=True)
 
 # model_name = 'train_mnist_hidden_mixup_exp%d.h5' % exp_id
 # net = HiddenMixupModel()
@@ -32,14 +33,20 @@ net = SNNLModel(train_it=True)
 # net = ClassAuxVAE((1, 28, 28), num_classes=10, latent_dim=20)
 
 # model_name = 'adv_mnist_exp%d.h5' % exp_id
-# # basic_net = BasicModel()
-# basic_net = BasicModelV2()
+# basic_net = BasicModel()
+# # basic_net = BasicModelV2()
 # config = {'epsilon': 0.3,
 #           'num_steps': 40,
 #           'step_size': 0.01,
 #           'random_start': True,
 #           'loss_func': 'xent'}
-# net = PGDModel(basic_net, config)
+# # net = PGDModel(basic_net, config)
+# net = PGDL2Model(basic_net, config)
+
+model_name = 'dist_mnist_exp%d.h5' % exp_id
+init_it = 1
+train_it = False
+net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
 
 # Set all random seeds
 seed = 2019
@@ -84,6 +91,8 @@ x = x_test.requires_grad_(True)[:1000]
 
 norms = compute_spnorm(x, dknn, layers)
 print(', '.join('%.4f' % i for i in norms.mean(0)))
+
+# x = x_test[:1000]
 
 lid = np.zeros((x.size(0), len(layers)))
 reps = dknn.get_activations(x, requires_grad=False)

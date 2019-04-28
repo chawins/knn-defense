@@ -321,7 +321,7 @@ class SoftDKNNAttack(object):
                 logits = self.get_logits(dknn, x, train_reps, layer)
                 loss, l2dist = self.loss_function(
                     logits, x, label, const, x_recon)
-                loss.backward(retain_graph=True)
+                loss.backward()
                 optimizer.step()
 
                 if iteration % (np.ceil(max_iterations / 10)) == 0:

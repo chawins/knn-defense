@@ -11,10 +11,10 @@ import torch.nn as nn
 import torch.optim as optim
 
 from lib.dataset_utils import *
-from lib.mnist_model import *
+from lib.lip_model import *
 
 
-def evaluate(net, dataloader, criterion, device):
+def evaluate(net, margin, dataloader, device):
 
     net.eval()
     val_loss = 0
@@ -24,7 +24,7 @@ def evaluate(net, dataloader, criterion, device):
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
-            loss = criterion(outputs, targets)
+            loss = net.loss_function(outputs, targets, margin=margin)
             val_loss += loss.item()
             _, predicted = outputs.max(1)
             val_total += targets.size(0)
@@ -33,7 +33,7 @@ def evaluate(net, dataloader, criterion, device):
     return val_loss / val_total, val_correct / val_total
 
 
-def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
+def train(net, margin, trainloader, validloader, optimizer, epoch, device,
           log, save_best_only=True, best_acc=0, model_path='./model.pt'):
 
     net.train()
@@ -44,7 +44,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = net(inputs)
-        loss = criterion(outputs, targets)
+        loss = net.loss_function(outputs, targets, margin=margin)
         loss.backward()
         optimizer.step()
 
@@ -53,7 +53,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
         train_total += targets.size(0)
         train_correct += predicted.eq(targets).sum().item()
 
-    val_loss, val_acc = evaluate(net, validloader, criterion, device)
+    val_loss, val_acc = evaluate(net, margin, validloader, device)
 
     log.info(' %5d | %.4f, %.4f | %8.4f, %7.4f', epoch,
              train_loss / train_total, train_correct / train_total,
@@ -70,14 +70,15 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 0
-    model_name = 'train_mnist_exp%d' % exp_id
+    exp_id = 2
+    model_name = 'lip_mnist_exp%d' % exp_id
+    margin = 1
 
     # Training parameters
-    batch_size = 128
-    epochs = 15
+    batch_size = 256
+    epochs = 50
     data_augmentation = False
-    learning_rate = 1e-3
+    learning_rate = 1e-4
     l1_reg = 0
     l2_reg = 1e-4
 
@@ -122,23 +123,21 @@ def main():
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    net = BasicModel()
+    net = LipschitzModel()
     net = net.to(device)
-    if device == 'cuda':
-        net = torch.nn.DataParallel(net)
-        cudnn.benchmark = True
-
-    criterion = nn.CrossEntropyLoss()
+    # if device == 'cuda':
+    #     net = torch.nn.DataParallel(net)
+    #     cudnn.benchmark = True
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
 
     log.info(' epoch | loss  , acc    | val_loss, val_acc')
     best_acc = 0
     for epoch in range(epochs):
-        best_acc = train(net, trainloader, validloader, criterion, optimizer,
+        best_acc = train(net, margin, trainloader, validloader, optimizer,
                          epoch, device, log, save_best_only=True,
                          best_acc=best_acc, model_path=model_path)
 
-    test_loss, test_acc = evaluate(net, testloader, criterion, device)
+    test_loss, test_acc = evaluate(net, margin, testloader, device)
     log.info('Test loss: %.4f, Test acc: %.4f', test_loss, test_acc)
 
 

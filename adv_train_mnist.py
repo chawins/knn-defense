@@ -73,7 +73,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 1
+    exp_id = 4
     model_name = 'adv_mnist_exp%d' % exp_id
 
     # Training parameters
@@ -125,15 +125,22 @@ def main():
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    # basic_net = BasicModel()
-    basic_net = BasicModelV2()
+    basic_net = BasicModel()
+    # basic_net = BasicModelV2()
     basic_net = basic_net.to(device)
-    config = {'epsilon': 0.3,
-              'num_steps': 40,
-              'step_size': 0.01,
+
+    # config = {'epsilon': 0.3,
+    #           'num_steps': 40,
+    #           'step_size': 0.01,
+    #           'random_start': True,
+    #           'loss_func': 'xent'}
+    # net = PGDModel(basic_net, config)
+    config = {'num_steps': 20,
+              'step_size': 0.1,
               'random_start': True,
               'loss_func': 'xent'}
-    net = PGDModel(basic_net, config)
+    net = PGDL2Model(basic_net, config)
+
     net = net.to(device)
     # if device == 'cuda':
     #     net = torch.nn.DataParallel(net)
