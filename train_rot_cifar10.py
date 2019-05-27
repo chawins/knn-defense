@@ -1,4 +1,4 @@
-'''Train MNIST model'''
+'''Train CIFAR-10 model with rotation self-supervision'''
 from __future__ import print_function
 
 import logging
@@ -10,9 +10,9 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
 
+from lib.cifar_resnet import *
 from lib.dataset_utils import *
 from lib.lip_model import *
-from lib.mnist_model import *
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -27,6 +27,8 @@ def evaluate(net, dataloader, criterion, device):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             inputs, targets = inputs.to(device), targets.to(device)
+            inputs = inputs.view(-1, 3, 32, 32)
+            targets = targets.view(-1)
             outputs = net(inputs)
             loss = criterion(outputs, targets)
             val_loss += loss.item()
@@ -46,6 +48,8 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
     train_total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
+        inputs = inputs.view(-1, 3, 32, 32)
+        targets = targets.view(-1)
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
@@ -74,12 +78,11 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 20
-    # model_name = 'train_mnist_exp%d' % exp_id
-    model_name = 'dist_mnist_ce_exp%d' % exp_id
+    exp_id = 0
+    model_name = 'rot_cifar10_exp%d' % exp_id
 
     # Training parameters
-    batch_size = 128
+    batch_size = 32
     epochs = 200
     data_augmentation = False
     learning_rate = 1e-3
@@ -116,21 +119,32 @@ def main():
     log.addHandler(fh)
 
     log.info(log_file)
-    log.info(('MNIST | exp_id: {}, seed: {}, init_learning_rate: {}, ' +
+    log.info(('CIFAR-10 | exp_id: {}, seed: {}, init_learning_rate: {}, ' +
               'batch_size: {}, l2_reg: {}, l1_reg: {}, epochs: {}, ' +
               'data_augmentation: {}, subtract_pixel_mean: {}').format(
                   exp_id, seed, learning_rate, batch_size, l2_reg, l1_reg,
                   epochs, data_augmentation, subtract_pixel_mean))
 
     log.info('Preparing data...')
-    trainloader, validloader, testloader = load_mnist(
+    trainloader, validloader, testloader = load_cifar10_rot(
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    # net = BasicModel()
-    init_it = 1
-    train_it = False
-    net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+    net = PreActResNet(PreActBlock, [2, 2, 2, 2], num_classes=4)
+    # net = AlexNet()
+
+    # config = {'epsilon': 0.3,
+    #           'num_steps': 40,
+    #           'step_size': 0.01,
+    #           'random_start': True,
+    #           'loss_func': 'xent'}
+    # net = PGDModel(basic_net, config)
+    # config = {'num_steps': 8,
+    #           'step_size': 0.05,
+    #           'random_start': True,
+    #           'loss_func': 'xent'}
+    # net = PGDL2Model(net, config)
+
     net = net.to(device)
     # if device == 'cuda':
     #     net = torch.nn.DataParallel(net)

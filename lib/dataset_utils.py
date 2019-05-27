@@ -10,9 +10,46 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
+from torch.utils.data import Dataset
 from torch.utils.data.sampler import SubsetRandomSampler
 
 from sklearn.model_selection import train_test_split
+
+
+def rotate_img(img, rot):
+    if rot == 0:  # 0 degrees rotation
+        return img
+    elif rot == 90:  # 90 degrees rotation
+        return np.flipud(np.transpose(img, (1, 0, 2)))
+    elif rot == 180:  # 90 degrees rotation
+        return np.fliplr(np.flipud(img))
+    elif rot == 270:  # 270 degrees rotation / or -90
+        return np.transpose(np.flipud(img), (1, 0, 2))
+    else:
+        raise ValueError('rotation should be 0, 90, 180, or 270 degrees')
+
+
+class RotateDataset(Dataset):
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.transform = transforms.Compose([
+            transforms.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img = self.dataset[idx]
+        rotated_imgs = [
+            self.transform(img),
+            self.transform(rotate_img(img, 90).copy()),
+            self.transform(rotate_img(img, 180).copy()),
+            self.transform(rotate_img(img, 270).copy())
+        ]
+        rotation_labels = torch.LongTensor([0, 1, 2, 3])
+        return torch.stack(rotated_imgs, dim=0), rotation_labels
 
 
 def load_mnist(batch_size,
@@ -66,6 +103,27 @@ def load_mnist_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
 
     return ((torch.tensor(x_train), torch.tensor(y_train)),
             (torch.tensor(x_valid), torch.tensor(y_valid)), (x_test, y_test))
+
+
+def load_mnist_rot(batch_size, data_dir='./data', val_size=0.1, shuffle=True,
+                   seed=1):
+
+    (x_train, _), (x_valid, _), (x_test, _) = load_mnist_all(
+        data_dir, val_size=val_size, seed=seed)
+
+    traindataset = RotateDataset(x_train.numpy().transpose(0, 2, 3, 1))
+    trainloader = torch.utils.data.DataLoader(
+        traindataset, batch_size=batch_size, shuffle=shuffle, num_workers=4)
+
+    validdataset = RotateDataset(x_valid.numpy().transpose(0, 2, 3, 1))
+    validloader = torch.utils.data.DataLoader(
+        validdataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    testdataset = RotateDataset(x_test.numpy().transpose(0, 2, 3, 1))
+    testloader = torch.utils.data.DataLoader(
+        testdataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    return trainloader, validloader, testloader
 
 
 def load_cifar10(batch_size,
@@ -178,6 +236,27 @@ def load_cifar10_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
     x_test = next(iter(testloader))
 
     return x_train, x_valid, x_test
+
+
+def load_cifar10_rot(batch_size, data_dir='./data', val_size=0.1, shuffle=True,
+                     seed=1):
+
+    (x_train, _), (x_valid, _), (x_test, _) = load_cifar10_all(
+        data_dir, val_size=val_size, seed=seed)
+
+    traindataset = RotateDataset(x_train.numpy().transpose(0, 2, 3, 1))
+    trainloader = torch.utils.data.DataLoader(
+        traindataset, batch_size=batch_size, shuffle=shuffle, num_workers=4)
+
+    validdataset = RotateDataset(x_valid.numpy().transpose(0, 2, 3, 1))
+    validloader = torch.utils.data.DataLoader(
+        validdataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    testdataset = RotateDataset(x_test.numpy().transpose(0, 2, 3, 1))
+    testloader = torch.utils.data.DataLoader(
+        testdataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    return trainloader, validloader, testloader
 
 
 def load_gtsrb(data_dir='./data', gray=False, train_file_name=None):

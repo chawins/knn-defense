@@ -1,4 +1,4 @@
-'''Train MNIST model'''
+'''Train MNIST model with adversarial training'''
 from __future__ import print_function
 
 import logging
@@ -10,77 +10,70 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
 
+from lib.adv_model import *
 from lib.dataset_utils import *
-from lib.lip_model import *
 from lib.mnist_model import *
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
-def evaluate(net, dataloader, criterion, device):
+def evaluate(net, dataloader, criterion, device, adv=False):
 
     net.eval()
     val_loss = 0
-    val_correct = 0
     val_total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(dataloader):
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
+            inputs, targets = inputs.to(device), inputs.to(device)
+            _, outputs = net(inputs, targets, attack=adv)
             loss = criterion(outputs, targets)
             val_loss += loss.item()
-            _, predicted = outputs.max(1)
             val_total += targets.size(0)
-            val_correct += predicted.eq(targets).sum().item()
 
-    return val_loss / val_total, val_correct / val_total
+    return val_loss / val_total
 
 
 def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
-          log, save_best_only=True, best_acc=0, model_path='./model.pt'):
+          log, save_best_only=True, best_loss=1e9, model_path='./model.pt'):
 
     net.train()
     train_loss = 0
-    train_correct = 0
     train_total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
+        inputs, targets = inputs.to(device), inputs.to(device)
         optimizer.zero_grad()
-        outputs = net(inputs)
+        _, outputs = net(inputs, targets, attack=True)
         loss = criterion(outputs, targets)
         loss.backward()
         optimizer.step()
 
         train_loss += loss.item()
-        _, predicted = outputs.max(1)
         train_total += targets.size(0)
-        train_correct += predicted.eq(targets).sum().item()
 
-    val_loss, val_acc = evaluate(net, validloader, criterion, device)
+    adv_loss = evaluate(net, validloader, criterion, device, adv=True)
+    val_loss = evaluate(net, validloader, criterion, device, adv=False)
 
-    log.info(' %5d | %.4f, %.4f | %8.4f, %7.4f', epoch,
-             train_loss / train_total, train_correct / train_total,
-             val_loss, val_acc)
+    log.info(' %5d | %.4f | %.4f | %.4f | ',
+             epoch, train_loss / train_total, adv_loss, val_loss)
 
     # Save model weights
-    if not save_best_only or (save_best_only and val_acc > best_acc):
+    if not save_best_only or (save_best_only and adv_loss < best_loss):
         log.info('Saving model...')
         torch.save(net.state_dict(), model_path)
-        best_acc = val_acc
-    return best_acc
+        best_loss = adv_loss
+    return best_loss
 
 
 def main():
 
     # Set experiment id
-    exp_id = 20
-    # model_name = 'train_mnist_exp%d' % exp_id
-    model_name = 'dist_mnist_ce_exp%d' % exp_id
+    exp_id = 0
+    model_name = 'adv_mnist_ae_exp%d' % exp_id
 
     # Training parameters
     batch_size = 128
-    epochs = 200
+    epochs = 70
     data_augmentation = False
     learning_rate = 1e-3
     l1_reg = 0
@@ -104,7 +97,7 @@ def main():
 
     # Get logger
     log_file = model_name + '.log'
-    log = logging.getLogger('train_mnist')
+    log = logging.getLogger('adv_mnist_ae')
     log.setLevel(logging.DEBUG)
     # Create formatter and add it to the handlers
     formatter = logging.Formatter(
@@ -127,27 +120,43 @@ def main():
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    # net = BasicModel()
-    init_it = 1
-    train_it = False
-    net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+    basic_net = Autoencoder((1, 28, 28), latent_dim=128)
+    basic_net = basic_net.to(device)
+
+    # config = {'epsilon': 0.3,
+    #           'num_steps': 40,
+    #           'step_size': 0.01,
+    #           'random_start': True,
+    #           'loss_func': 'xent'}
+    # net = PGDModel(basic_net, config)
+    config = {'num_steps': 40,
+              'step_size': 0.1,
+              'random_start': True,
+              'loss_func': 'xent'}
+    net = PGDL2Model(basic_net, config)
+
     net = net.to(device)
     # if device == 'cuda':
     #     net = torch.nn.DataParallel(net)
     #     cudnn.benchmark = True
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.MSELoss(reduction='sum')
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, [40, 50, 60], gamma=0.1)
 
-    log.info(' epoch | loss  , acc    | val_loss, val_acc')
-    best_acc = 0
+    log.info(' epoch | loss | adv_l | val_l |')
+    best_loss = 1e9
     for epoch in range(epochs):
-        best_acc = train(net, trainloader, validloader, criterion, optimizer,
-                         epoch, device, log, save_best_only=True,
-                         best_acc=best_acc, model_path=model_path)
+        lr_scheduler.step()
+        best_loss = train(net, trainloader, validloader, criterion, optimizer,
+                          epoch, device, log, save_best_only=True,
+                          best_loss=best_loss, model_path=model_path)
 
-    test_loss, test_acc = evaluate(net, testloader, criterion, device)
-    log.info('Test loss: %.4f, Test acc: %.4f', test_loss, test_acc)
+    test_loss = evaluate(net, testloader, criterion, device, adv=False)
+    log.info('Test loss: %.4f', test_loss)
+    test_loss = evaluate(net, testloader, criterion, device, adv=True)
+    log.info('Test adv loss: %.4f', test_loss)
 
 
 if __name__ == '__main__':

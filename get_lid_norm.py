@@ -10,14 +10,15 @@ from lib.dknn import DKNN, DKNNL2
 from lib.lip_model import *
 from lib.mnist_model import *
 from lib.utils import *
+from tune_mnist import Identity
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-exp_id = 11
+exp_id = 0
 
-# model_name = 'train_mnist_exp%d.h5' % exp_id
-# net = BasicModel()
+model_name = 'train_mnist_exp%d.h5' % exp_id
+net = BasicModel()
 
 # model_name = 'train_mnist_snnl_exp%d.h5' % exp_id
 # net = SNNLModel(train_it=True)
@@ -43,10 +44,26 @@ exp_id = 11
 # # net = PGDModel(basic_net, config)
 # net = PGDL2Model(basic_net, config)
 
-model_name = 'dist_mnist_exp%d.h5' % exp_id
-init_it = 1
-train_it = False
-net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+# model_name = 'dist_mnist_exp%d.h5' % exp_id
+# init_it = 1
+# train_it = False
+# net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+
+# orig_model = 'adv_mnist_exp2.h5'
+# model_name = 'tune%d_%s' % (exp_id, orig_model)
+# net = BasicModel()
+# net.fc = Identity()
+
+# model_name = 'ae_mnist_exp%d.h5' % exp_id
+# net = Autoencoder((1, 28, 28), 128)
+
+# model_name = 'adv_mnist_ae_exp%d.h5' % exp_id
+# basic_net = Autoencoder((1, 28, 28), latent_dim=128)
+# config = {'num_steps': 40,
+#           'step_size': 0.1,
+#           'random_start': True,
+#           'loss_func': 'xent'}
+# net = PGDL2Model(basic_net, config)
 
 # Set all random seeds
 seed = 2019
@@ -62,24 +79,35 @@ if not os.path.isdir(save_dir):
 model_path = os.path.join(save_dir, model_name)
 
 net = net.to(device)
-# if device == 'cuda':
-#     net = torch.nn.DataParallel(net)
-#     cudnn.benchmark = True
+if device == 'cuda':
+    net = torch.nn.DataParallel(net)
+    cudnn.benchmark = True
 net.load_state_dict(torch.load(model_path))
-# net = net.module
+net = net.module
 # net = net.basic_net
 net.eval()
 
 (x_train, y_train), (x_valid, y_valid), (x_test, y_test) = load_mnist_all(
     '/data', val_size=0.1, seed=seed)
 
-layers = ['relu1', 'relu2', 'relu3', 'fc']
+
+net.conv1 = Identity()
+net.relu1 = Identity()
+net.conv2 = Identity()
+net.relu2 = Identity()
+net.conv3 = Identity()
+net.relu3 = Identity()
+net.fc = Identity()
+
+# layers = ['relu1', 'relu2', 'relu3', 'fc']
 # layers = ['relu1', 'relu2', 'relu3', 'en_mu']
 # layers = ['relu1', 'relu2', 'relu3']
-# layers = ['relu3']
+layers = ['relu1']
 # layers = ['en_conv3']
 # layers = ['en_mu']
 # layers = ['maxpool1', 'maxpool2', 'relu3', 'fc2']
+# layers = ['gs1', 'gs2', 'gs3', 'fc']
+
 # net = net.cpu()
 with torch.no_grad():
     # dknn = DKNN(net, x_train, y_train, x_valid, y_valid, layers,

@@ -14,6 +14,9 @@ from lib.adv_model import *
 from lib.dataset_utils import *
 from lib.mnist_model import *
 
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 
 def evaluate(net, dataloader, criterion, device, adv=False):
 
@@ -23,7 +26,7 @@ def evaluate(net, dataloader, criterion, device, adv=False):
     val_total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(dataloader):
-            inputs, targets = inputs.to(device), targets.to(device)
+            inputs, targets = inputs.to(device), inputs.to(device)
             outputs = net(inputs, targets, attack=adv)
             loss = criterion(outputs, targets)
             val_loss += loss.item()
@@ -42,7 +45,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
     train_correct = 0
     train_total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
+        inputs, targets = inputs.to(device), inputs.to(device)
         optimizer.zero_grad()
         outputs = net(inputs, targets, attack=True)
         loss = criterion(outputs, targets)
@@ -73,7 +76,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 4
+    exp_id = 5
     model_name = 'adv_mnist_exp%d' % exp_id
 
     # Training parameters
@@ -135,7 +138,7 @@ def main():
     #           'random_start': True,
     #           'loss_func': 'xent'}
     # net = PGDModel(basic_net, config)
-    config = {'num_steps': 20,
+    config = {'num_steps': 40,
               'step_size': 0.1,
               'random_start': True,
               'loss_func': 'xent'}

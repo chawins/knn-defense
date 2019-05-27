@@ -1,4 +1,4 @@
-'''Train MNIST model'''
+'''Train Basic CIFAR-10 model'''
 from __future__ import print_function
 
 import logging
@@ -99,7 +99,7 @@ def main():
 
     # Get logger
     log_file = model_name + '.log'
-    log = logging.getLogger('train_mnist')
+    log = logging.getLogger('train_cifar10')
     log.setLevel(logging.DEBUG)
     # Create formatter and add it to the handlers
     formatter = logging.Formatter(

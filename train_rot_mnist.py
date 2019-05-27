@@ -1,4 +1,4 @@
-'''Train MNIST model'''
+'''Train MNIST model with rotation self-supervision'''
 from __future__ import print_function
 
 import logging
@@ -27,6 +27,8 @@ def evaluate(net, dataloader, criterion, device):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(dataloader):
             inputs, targets = inputs.to(device), targets.to(device)
+            inputs = inputs.view(-1, 1, 28, 28)
+            targets = targets.view(-1)
             outputs = net(inputs)
             loss = criterion(outputs, targets)
             val_loss += loss.item()
@@ -46,6 +48,8 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
     train_total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
+        inputs = inputs.view(-1, 1, 28, 28)
+        targets = targets.view(-1)
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
@@ -74,12 +78,11 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 20
-    # model_name = 'train_mnist_exp%d' % exp_id
-    model_name = 'dist_mnist_ce_exp%d' % exp_id
+    exp_id = 0
+    model_name = 'rot_mnist_exp%d' % exp_id
 
     # Training parameters
-    batch_size = 128
+    batch_size = 32
     epochs = 200
     data_augmentation = False
     learning_rate = 1e-3
@@ -123,14 +126,15 @@ def main():
                   epochs, data_augmentation, subtract_pixel_mean))
 
     log.info('Preparing data...')
-    trainloader, validloader, testloader = load_mnist(
+    trainloader, validloader, testloader = load_mnist_rot(
         batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
 
     log.info('Building model...')
-    # net = BasicModel()
-    init_it = 1
-    train_it = False
-    net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+    net = BasicModel(num_classes=4)
+    # init_it = 1
+    # train_it = False
+    # net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
+
     net = net.to(device)
     # if device == 'cuda':
     #     net = torch.nn.DataParallel(net)

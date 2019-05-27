@@ -35,7 +35,6 @@ def search_index_pytorch(index, x, k, D=None, I=None):
     xptr = swig_ptr_from_FloatTensor(x)
     Iptr = swig_ptr_from_LongTensor(I)
     Dptr = swig_ptr_from_FloatTensor(D)
-    index.search_c(n, xptr,
-                   k, Dptr, Iptr)
+    index.search_c(n, xptr, k, Dptr, Iptr)
     torch.cuda.synchronize()
     return D, I

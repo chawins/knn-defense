@@ -13,6 +13,8 @@ import torch.optim as optim
 
 import foolbox
 from lib.adv_model import *
+from lib.cifar10_model import *
+from lib.cifar_resnet import *
 from lib.cwl2_attack import CWL2Attack
 from lib.dataset_utils import *
 from lib.dknn import DKNN, DKNNL2
@@ -20,79 +22,36 @@ from lib.dknn_attack import *
 from lib.dknn_attack_l2 import *
 from lib.knn import *
 from lib.lip_model import *
-from lib.mnist_model import *
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-exp_id = 0
+exp_id = 2
 
-model_name = 'train_mnist_exp%d.h5' % exp_id
-net = BasicModel()
+# model_name = 'adv_cifar10_exp%d.h5' % exp_id
+# model_name = 'train_cifar10_vae_exp%d.h5' % exp_id
+# model_name = 'rot_cifar10_exp%d.h5' % exp_id
+# model_name = 'ae_cifar10_exp%d.h5' % exp_id
+model_name = 'cifar10_resnet_exp%d.h5' % exp_id
 
-# model_name = 'train_mnist_snnl_exp%d.h5' % exp_id
-# net = SNNLModel(train_it=True)
+net = PreActResNet(PreActBlock, [2, 2, 2, 2], num_classes=10)
 
-# model_name = 'train_mnist_hidden_mixup_exp%d.h5' % exp_id
-# net = HiddenMixupModel()
-
-# model_name = 'train_mnist_vae_exp%d.h5' % exp_id
-# # net = VAE((1, 28, 28), num_classes=10, latent_dim=20)
-# net = VAE2((1, 28, 28), num_classes=10, latent_dim=128)
-
-# model_name = 'train_mnist_cav_exp%d.h5' % exp_id
-# net = ClassAuxVAE((1, 28, 28), num_classes=10, latent_dim=20)
-
-# model_name = 'dist_mnist_exp%d.h5' % exp_id
-# init_it = 1
-# train_it = False
-# net = NeighborModel(num_classes=10, init_it=init_it, train_it=train_it)
-
-# model_name = 'lipae_mnist_exp%d.h5' % exp_id
-# init_it = 1
-# train_it = False
-# latent_dim = 128
-# alpha = 1e2
-# net = NCA_AE(latent_dim=latent_dim, init_it=init_it,
-#              train_it=train_it, alpha=alpha)
-
-# model_name = 'adv_mnist_exp%d.h5' % exp_id
-# basic_net = BasicModel()
-# # basic_net = BasicModelV2()
-# config = {'epsilon': 0.3,
-#           'num_steps': 40,
-#           'step_size': 0.01,
-#           'random_start': True,
-#           'loss_func': 'xent'}
-# net = PGDL2Model(basic_net, config)
-
-# model_name = 'adv_mnist_ae_exp%d.h5' % exp_id
-# basic_net = Autoencoder((1, 28, 28), latent_dim=128)
-# config = {'num_steps': 40,
-#           'step_size': 0.1,
-#           'random_start': True,
-#           'loss_func': 'xent'}
-# net = PGDL2Model(basic_net, config)
-
-# model_name = 'ae_mnist_exp%d.h5' % exp_id
-# net = Autoencoder((1, 28, 28), 128)
-
-# model_name = 'rot_mnist_exp%d.h5' % exp_id
-# net = BasicModel(num_classes=4)
-
-# model_name = 'adv_rot_mnist_exp%d.h5' % exp_id
-# basic_net = BasicModel(num_classes=4)
-# config = {'num_steps': 20,
+# net = PreActResNet(PreActBlock, [2, 2, 2, 2]).eval()
+# config = {'num_steps': 8,
 #           'step_size': 0.05,
 #           'random_start': True,
 #           'loss_func': 'xent'}
-# net = PGDL2Model(basic_net, config)
+# net = PGDL2Model(net, config)
+
+# net = PreActResNet(PreActBlock, [2, 2, 2, 2], num_classes=4)
+# net.load_state_dict(torch.load('saved_models/' + model_name))
+# net = net.eval().to('cuda')
 
 # layers = ['relu1', 'relu2', 'relu3', 'fc']
 # layers = ['gs1', 'gs2', 'gs3', 'fc']
 # layers = ['relu1', 'relu2', 'relu3', 'fc1', 'fc2']
 # layers = ['conv1', 'relu1', 'conv2', 'relu2', 'relu3', 'fc1', 'fc2']
-layers = ['relu3']
+layers = ['layer4']
 
 # Set all random seeds
 seed = 2019
@@ -116,26 +75,8 @@ net = net.module
 # net = net.basic_net
 net.eval()
 
-(x_train, y_train), (x_valid, y_valid), (x_test, y_test) = load_mnist_all(
+(x_train, y_train), (x_valid, y_valid), (x_test, y_test) = load_cifar10_all(
     '/data', val_size=0.1, seed=seed)
-
-
-# class Identity(nn.Module):
-#
-#     def __init__(self):
-#         super(Identity, self).__init__()
-#
-#     def forward(self, x):
-#         return x
-#
-#
-# net.conv1 = Identity()
-# net.relu1 = Identity()
-# net.conv2 = Identity()
-# net.relu2 = Identity()
-# net.conv3 = Identity()
-# net.relu3 = Identity()
-# net.fc = Identity()
 
 
 num = 10000
@@ -161,9 +102,9 @@ def attack_batch(x, y, batch_size, layer):
         end = (i + 1) * batch_size
         x_a[begin:end] = attack(
             dknn, x[begin:end], y[begin:end],
-            guide_layer=layer, m=100, binary_search_steps=10,
-            max_iterations=500, learning_rate=1e-1, initial_const=1e-3,
-            abort_early=True, random_start=False, guide=1)
+            guide_layer=layer, m=300, binary_search_steps=10,
+            max_iterations=500, learning_rate=1e-2, initial_const=1e-7,
+            abort_early=False, random_start=True, guide=2)
     return x_a
 
 
@@ -172,9 +113,7 @@ for layer in layers:
     x_adv = attack_batch(x_test[ind][:num].cuda(),
                          y_test[ind][:num], 100, layer)
 
-    pickle.dump(x_adv.cpu().detach(), open(
-        'x_adv_' + model_name + '.p', 'wb'))
-    # pickle.dump(x_adv.cpu().detach(), open('x_adv_knn.p', 'wb'))
+    pickle.dump(x_adv.cpu().detach(), open('x_adv_' + model_name + '.p', 'wb'))
 
     y_pred = dknn.classify(x_adv)
     acc = (y_pred.argmax(1) == y_test[ind][:num].numpy()).sum() / len(y_pred)

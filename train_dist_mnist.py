@@ -1,4 +1,4 @@
-'''Train MNIST model'''
+'''Train Distance MNIST model'''
 from __future__ import print_function
 
 import logging
@@ -12,6 +12,9 @@ import torch.optim as optim
 
 from lib.dataset_utils import *
 from lib.lip_model import *
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 def evaluate(net, dataloader, device):
@@ -62,18 +65,19 @@ def train(net, trainloader, validloader, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 14
+    exp_id = 28
     model_name = 'dist_mnist_exp%d' % exp_id
     init_it = 1
     train_it = False
 
     # Training parameters
-    batch_size = 256
+    batch_size = 128
     epochs = 100
     data_augmentation = False
     learning_rate = 1e-3
     l1_reg = 0
     l2_reg = 1e-4
+    use_schedule = False
 
     # Subtracting pixel mean improves accuracy
     subtract_pixel_mean = False
@@ -121,11 +125,19 @@ def main():
     # if device == 'cuda':
     #     net = torch.nn.DataParallel(net)
     #     cudnn.benchmark = True
+
+    net.load_state_dict(torch.load('saved_models/dist_mnist_exp24.h5'))
+
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+    if use_schedule:
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, [100, 150], gamma=0.1)
 
     log.info(' epoch | loss  | v_loss')
     best_loss = 1e9
     for epoch in range(epochs):
+        if use_schedule:
+            lr_scheduler.step()
         best_loss = train(net, trainloader, validloader, optimizer,
                           epoch, device, log, save_best_only=True,
                           best_loss=best_loss, model_path=model_path)

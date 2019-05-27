@@ -410,3 +410,59 @@ class HiddenMixupModel(nn.Module):
         mixed_x = lam * x + (1 - lam) * x[index, :]
         y_a, y_b = y, y[index]
         return mixed_x, y_a, y_b, lam
+
+
+class Autoencoder(nn.Module):
+
+    def __init__(self, input_dim, latent_dim=20):
+        super(Autoencoder, self).__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.input_dim_flat = 1
+        for dim in input_dim:
+            self.input_dim_flat *= dim
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=8, stride=2, padding=3)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=6, stride=2, padding=3)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv3 = nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=0)
+        self.relu3 = nn.ReLU(inplace=True)
+        self.fc = nn.Linear(2048, 400)
+        self.relu4 = nn.ReLU(inplace=True)
+        self.latent = nn.Linear(400, latent_dim)
+
+        self.de_fc1 = nn.Linear(latent_dim, 400)
+        self.relu5 = nn.ReLU(inplace=True)
+        self.de_fc2 = nn.Linear(400, self.input_dim_flat)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def encode(self, x):
+        x = self.relu1(self.conv1(x))
+        x = self.relu2(self.conv2(x))
+        x = self.relu3(self.conv3(x))
+        x = x.view(x.size(0), -1)
+        x = self.relu4(self.fc(x))
+        x = self.latent(x)
+        return x
+
+    def decode(self, z):
+        x = self.relu5(self.de_fc1(z))
+        x = self.de_fc2(x)
+        out_dim = (z.size(0), ) + self.input_dim
+        return x.view(out_dim)
+
+    def forward(self, x):
+        z = self.encode(x)
+        out = self.decode(z)
+        return z, out
+
+    def loss_function(self, latent, x_recon, inputs, targets):
+        # MSE loss
+        return torch.sum((inputs - x_recon) ** 2)

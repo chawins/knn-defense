@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-INFTY = 1e25
+INFTY = 1e10
 
 
 class DKNNL2Attack(object):
@@ -15,7 +15,7 @@ class DKNNL2Attack(object):
     def __call__(self, dknn, x_orig, label, guide_layer='relu1', m=100,
                  binary_search_steps=5, max_iterations=500,
                  learning_rate=1e-2, initial_const=1, abort_early=True,
-                 max_linf=None):
+                 max_linf=None, random_start=False, guide=1):
         """
         x_orig is tensor (requires_grad=False)
         """
@@ -27,6 +27,7 @@ class DKNNL2Attack(object):
         batch_size = x_orig.size(0)
         x_adv = x_orig.clone()
         label = label.cpu().numpy()
+        input_shape = x_orig.detach().cpu().numpy().shape
         device = dknn.device
 
         def to_attack_space(x):
@@ -68,9 +69,13 @@ class DKNNL2Attack(object):
         best_l2dist = torch.zeros_like(const) + INFTY
 
         with torch.no_grad():
-            # choose guide samples and get their representations
-            x_guide = self.find_guide_samples(
-                dknn, x_orig, label, k=m, layer=guide_layer)
+            if guide == 1:
+                # choose guide samples and get their representations
+                x_guide = self.find_guide_samples(
+                    dknn, x_orig, label, k=m, layer=guide_layer)
+            else:
+                x_guide = self.find_guide_samples_v2(
+                    dknn, x_orig, label, k=m, layer=guide_layer)
             guide_reps = {}
             for i in range(batch_size):
                 guide_rep = dknn.get_activations(
@@ -88,14 +93,21 @@ class DKNNL2Attack(object):
             if (binary_search_step == binary_search_steps - 1 and
                     binary_search_steps >= 10):
                     # in the last binary search step, use the upper_bound instead
-                    # TODO: find out why... it's not obvious why this is useful
+                    # to ensure that unsuccessful attacks use the largest
+                    # possible constant
                 const = upper_bound
 
-            z_delta = torch.zeros_like(z_orig, requires_grad=True)
+            if not random_start:
+                z_delta = torch.zeros_like(z_orig, requires_grad=True)
+            else:
+                rand = np.random.randn(*input_shape) * 1e-2
+                z_delta = torch.tensor(
+                    rand, dtype=torch.float32, requires_grad=True, device=device)
             loss_at_previous_check = torch.zeros(1, device=device) + INFTY
 
             # create a new optimizer
             optimizer = optim.Adam([z_delta], lr=learning_rate)
+            # optimizer = optim.SGD([z_delta], lr=learning_rate)
 
             for iteration in range(max_iterations):
                 optimizer.zero_grad()
@@ -110,9 +122,9 @@ class DKNNL2Attack(object):
                     print('    step: %d; loss: %.3f; l2dist: %.3f' %
                           (iteration, loss.cpu().detach().numpy(),
                            l2dist.mean().cpu().detach().numpy()))
-                    # DEBUG:
-                    # for i in range(5):
-                    #     print(z_delta.grad[i].view(-1).norm().item())
+                # DEBUG:
+                # for i in range(5):
+                #     print(z_delta.grad[i].view(-1).norm().item())
 
                 if abort_early and iteration % (np.ceil(max_iterations / 10)) == 0:
                     # after each tenth of the iterations, check progress
@@ -178,9 +190,17 @@ class DKNNL2Attack(object):
             # thres = torch.tensor(
             #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
             # thres = torch.tensor([0.7105], device=device)
+            # cosine for kNN
+            # thres = torch.tensor([0.6146243], device=device)
             # a = 4
             # adv_loss[:, l] = cls.sigmoid(
             #     (rep * guide_reps[layer]).sum(2) - thres[l], a=a).sum(1)
+            # u = rep / torch.norm(rep, 2, 2, keepdim=True)
+            # guide_rep = guide_reps[layer].view(
+            #     batch_size, guide_reps[layer].size(1), -1)
+            # v = guide_rep / torch.norm(guide_rep, 2, 2, keepdim=True)
+            # dist = torch.norm(u - v, 2, 2)
+            # adv_loss[:, l] = cls.sigmoid(thres[l] - dist, a=a).sum(1)
 
             # (3) use soft version
             # width = 1
@@ -227,6 +247,30 @@ class DKNNL2Attack(object):
             nn[i] = dknn.x_train[ind[nn_ind]]
 
         return nn
+
+    @classmethod
+    def find_guide_samples_v2(cls, dknn, x, label, k=100, layer='relu1'):
+        # find nearest sample with different class
+        nn = dknn.find_nn_diff_class(x, label)
+        # now find k neighbors that has the same class as x_nn
+        x_nn = cls.find_nn_same_class(dknn, nn, k=k, layer=layer)
+        return x_nn
+
+    @staticmethod
+    def find_nn_same_class(dknn, ind_x, k=100, layer='relu1'):
+
+        batch_size = ind_x.shape[0]
+        label = dknn.y_train[ind_x]
+        x_nn = torch.zeros(
+            (k, batch_size) + dknn.x_train[0].size()).permute(1, 0, 2, 3, 4)
+        _, I = dknn.get_neighbors(
+            dknn.x_train[ind_x], k=dknn.x_train.size(0), layers=[layer])[0]
+
+        for i, ind in enumerate(I):
+            nn_ind = np.where(dknn.y_train[ind] == label[i])[0][:k]
+            x_nn[i] = dknn.x_train[ind[nn_ind]]
+
+        return x_nn
 
     @staticmethod
     def atanh(x):

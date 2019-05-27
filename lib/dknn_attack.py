@@ -173,19 +173,19 @@ class DKNNAttack(object):
 
             # (2) use sigmoid
             # this threshold is calculated with k = 75 on basic model
-            # thres = torch.tensor(
-            #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
+            thres = torch.tensor(
+                [0.7260, 0.6874, 0.7105, 0.9484], device=device)
             # thres = torch.tensor([0.7105], device=device)
-            # a = 4
-            # adv_loss[:, l] = cls.sigmoid(
-            #     (rep * guide_reps[layer]).sum(2) - thres[l], a=a).sum(1)
+            a = 4
+            adv_loss[:, l] = cls.sigmoid(
+                (rep * guide_reps[layer]).sum(2) - thres[l], a=a).sum(1)
 
             # (3) use soft version
-            width = 1
+            # width = 1
+            # # adv_loss[:, l] = torch.log(torch.exp(
+            # #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2).sum(1))
             # adv_loss[:, l] = torch.log(torch.exp(
-            #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2).sum(1))
-            adv_loss[:, l] = torch.log(torch.exp(
-                (rep * guide_reps[layer]).sum(2) / width**2).sum(1))
+            #     (rep * guide_reps[layer]).sum(2) / width**2).sum(1))
 
             # (4) use max instead of sigmoid
             # thres = torch.tensor(
