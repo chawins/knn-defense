@@ -1,8 +1,9 @@
 import logging
 
-import numpy as np
 import torch
 import torch.optim as optim
+
+import numpy as np
 
 
 class CWL2Attack(object):

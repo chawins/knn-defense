@@ -223,35 +223,84 @@ class DKNNL2Attack(object):
         """Check if label of <x> predicted by <dknn> matches with <label>"""
         y_pred = dknn.classify(x).argmax(1)
         return torch.tensor((y_pred != label).astype(np.float32)).to(dknn.device)
+        # y_pred = dknn.classify(x)
+        # is_adv = (y_pred.argmax(1) != label) & (
+        #     y_pred.max(1) >= int(dknn.k * 0.9))
+        # return torch.tensor(is_adv.astype(np.float32)).to(dknn.device)
+        # y_pred = dknn.classify_soft(x).argmax(1)
+        # return (y_pred != torch.tensor(label)).to(dknn.device)
 
     @classmethod
     def loss_function(cls, x, reps, guide_reps, layers, const, x_recon, device):
-        """Returns the loss averaged over the batch (first dimension of x) and
-        L-2 norm squared of the perturbation
-        """
+        """Returns the loss and the gradient of the loss w.r.t. x,
+        assuming that logits = model(x)."""
 
         batch_size = x.size(0)
         adv_loss = torch.zeros((batch_size, len(layers)), device=device)
-        # find squared L-2 distance between original samples and their
-        # adversarial examples at each layer
         for l, layer in enumerate(layers):
+            # cosine distance
             rep = reps[layer].view(batch_size, 1, -1)
+            # (1) directly minimize loss
             adv_loss[:, l] = ((rep - guide_reps[layer])**2).sum((1, 2))
-        # find L-2 norm squared of perturbation
+
+            # (2) use sigmoid
+            # this threshold is calculated with k = 75 on basic model
+            # thres = torch.tensor(
+            #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
+            # thres = torch.tensor([0.7105], device=device)
+            # cosine for kNN
+            # thres = torch.tensor([0.6146243], device=device)
+            # a = 4
+            # adv_loss[:, l] = cls.sigmoid(
+            #     (rep * guide_reps[layer]).sum(2) - thres[l], a=a).sum(1)
+            # u = rep / torch.norm(rep, 2, 2, keepdim=True)
+            # guide_rep = guide_reps[layer].view(
+            #     batch_size, guide_reps[layer].size(1), -1)
+            # v = guide_rep / torch.norm(guide_rep, 2, 2, keepdim=True)
+            # dist = torch.norm(u - v, 2, 2)
+            # adv_loss[:, l] = cls.sigmoid(thres[l] - dist, a=a).sum(1)
+
+            # (3) use soft version
+            # width = 1
+            # adv_loss[:, l] = torch.log(torch.exp(
+            #     -2 * (1 - (rep * guide_reps[layer]).sum(2)) / width**2).sum(1))
+            # adv_loss[:, l] = torch.log(torch.exp(
+            #     ((rep - guide_reps[layer])**2).sum(2) / width**2).sum(1))
+
+            # (4) use max instead of sigmoid
+            # thres = torch.tensor(
+            #     [0.7260, 0.6874, 0.7105, 0.9484], device=device)
+            # thres = torch.tensor([0.7105], device=device)
+            # zero = torch.tensor(0.).to(device)
+            # adv_loss[:, l] = - torch.max(
+            #     thres[l] - (rep * guide_reps[layer]).sum(2), zero).sum(1)
+
         l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
-        # total_loss is sum of squared perturbation norm and squared distance
-        # of representations, multiplied by constant
         total_loss = l2dist + const * adv_loss.mean(1)
 
         return total_loss.mean(), l2dist.sqrt()
 
     @staticmethod
     def find_guide_samples(dknn, x, label, k=100, layer='relu1'):
-        """Find k nearest neighbors to <x> that all have the same class but not
-        equal to <label>
+        """
+        Find k nearest neighbors to <x> that all have the same class but not
+        equal to <label>.
+
+        Arguments
+        ---------
+        dknn : DkNN object
+            the target DkNN
+        x : torch.tensor
+            queries that we want to
+        label
+        k
+        layer
+
+        Returns
+        -------
         """
         num_classes = dknn.num_classes
-        nn = torch.zeros((k, ) + x.size()).transpose(0, 1)
+        nn = torch.zeros((k, ) + x.size()).permute(1, 0, 2, 3, 4)
         D, I = dknn.get_neighbors(
             x, k=dknn.x_train.size(0), layers=[layer])[0]
 
@@ -260,6 +309,9 @@ class DKNNL2Attack(object):
             for j in range(num_classes):
                 mean_dist[j] = np.mean(
                     d[np.where(dknn.y_train[ind] == j)[0]][:k])
+            # TODO: distance definition may depend on the index used
+            # mean_dist[label[i]] -= INFTY
+            # nearest_label = mean_dist.argmax()
             mean_dist[label[i]] += INFTY
             nearest_label = mean_dist.argmin()
             nn_ind = np.where(dknn.y_train[ind] == nearest_label)[0][:k]
@@ -269,10 +321,6 @@ class DKNNL2Attack(object):
 
     @classmethod
     def find_guide_samples_v2(cls, dknn, x, label, k=100, layer='relu1'):
-        """Find the nearest neighbor to <x> that has a different label from
-        <label>. Then find other <k> - 1 training samples that are closest to
-        the neighbor and has the same class
-        """
         # find nearest sample with different class
         nn = dknn.find_nn_diff_class(x, label)
         # now find k neighbors that has the same class as x_nn
@@ -281,13 +329,11 @@ class DKNNL2Attack(object):
 
     @staticmethod
     def find_nn_same_class(dknn, ind_x, k=100, layer='relu1'):
-        """Find <k> training samples with the same class as and closest to the
-        training sample with index <ind_x> in representation space at <layer>
-        """
 
         batch_size = ind_x.shape[0]
         label = dknn.y_train[ind_x]
-        x_nn = torch.zeros((batch_size, k) + dknn.x_train[0].size())
+        x_nn = torch.zeros(
+            (k, batch_size) + dknn.x_train[0].size()).transpose(0, 1)
         _, I = dknn.get_neighbors(
             dknn.x_train[ind_x], k=dknn.x_train.size(0), layers=[layer])[0]
 

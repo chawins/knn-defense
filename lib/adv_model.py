@@ -65,10 +65,10 @@ class PGDL2Model(nn.Module):
         for _ in range(self.num_steps):
             x.requires_grad_()
             with torch.enable_grad():
-                # logits = self.basic_net(x)
-                # loss = F.cross_entropy(logits, targets, reduction='sum')
-                _, logits = self.basic_net(x)
-                loss = F.mse_loss(logits, targets, reduction='sum')
+                logits = self.basic_net(x)
+                loss = F.cross_entropy(logits, targets, reduction='sum')
+                # _, logits = self.basic_net(x)
+                # loss = F.mse_loss(logits, targets, reduction='sum')
             grad = torch.autograd.grad(loss, x)[0].detach()
             grad_norm = grad.view(x.size(0), -1).norm(2, 1)
             delta = self.step_size * grad / grad_norm.view(x.size(0), 1, 1, 1)

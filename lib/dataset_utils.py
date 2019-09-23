@@ -97,12 +97,15 @@ def load_mnist_all(data_dir='./data', val_size=0.1, shuffle=True, seed=1):
     x, y = next(iter(trainloader))
     x_test, y_test = next(iter(testloader))
 
-    x_train, x_valid, y_train, y_valid = train_test_split(
-        x.numpy(), y.numpy(), test_size=val_size, shuffle=shuffle,
-        random_state=seed, stratify=y)
-
-    return ((torch.tensor(x_train), torch.tensor(y_train)),
-            (torch.tensor(x_valid), torch.tensor(y_valid)), (x_test, y_test))
+    if val_size > 0:
+        x_train, x_valid, y_train, y_valid = train_test_split(
+            x.numpy(), y.numpy(), test_size=val_size, shuffle=shuffle,
+            random_state=seed, stratify=y)
+        return ((torch.tensor(x_train), torch.tensor(y_train)),
+                (torch.tensor(x_valid), torch.tensor(y_valid)),
+                (x_test, y_test))
+    else:
+        return ((x, y), (None, None), (x_test, y_test))
 
 
 def load_mnist_rot(batch_size, data_dir='./data', val_size=0.1, shuffle=True,
@@ -271,10 +274,10 @@ def load_gtsrb(data_dir='./data', gray=False, train_file_name=None):
 
         Parameters
         ----------
-        file    : string
-                          Name of the pickle file.
-        columns : list of strings
-                          List of columns in pickled data we're interested in.
+        file : string
+            Name of the pickle file.
+        columns : list of str
+            List of columns in pickled data we're interested in.
 
         Returns
         -------

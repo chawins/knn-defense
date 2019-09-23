@@ -1,4 +1,6 @@
-'''CIFAR-10 CNN models'''
+'''
+Define CIFAR-10 CNN models excluding ResNet models which are in cifar_resnet.py
+'''
 
 import copy
 import random
@@ -78,6 +80,9 @@ class CIFAR10_VAE(nn.Module):
         z = self.reparameterize(en_mu, en_logvar)
         output = self.decode(z)
         return en_mu, en_logvar, output
+
+
+# ============================================================================ #
 
 
 class CIFAR10_AE(nn.Module):

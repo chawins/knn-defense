@@ -1,4 +1,6 @@
-'''MNIST models'''
+'''
+Define MNIST models
+'''
 
 import copy
 import random
@@ -8,6 +10,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
+
+
+class KNNModel(nn.Module):
+    '''
+    A Pytorch model that apply an identiy function to the input (i.e. output =
+    input). It is used to simulate kNN on the input space so that it is
+    compatible with attacks implemented for DkNN.
+    '''
+
+    def __init__(self):
+        super(KNNModel, self).__init__()
+        self.identity = nn.Identity()
+
+    def forward(self, x):
+        x = self.identity(x)
+        return x
+
+
+# ============================================================================ #
 
 
 class BasicModel(nn.Module):
@@ -42,6 +63,9 @@ class BasicModel(nn.Module):
         return x
 
 
+# ============================================================================ #
+
+
 class BasicModelV2(nn.Module):
 
     def __init__(self, num_classes=10):
@@ -73,6 +97,9 @@ class BasicModelV2(nn.Module):
         x = self.relu3(self.fc1(x))
         x = self.fc2(x)
         return x
+
+
+# ============================================================================ #
 
 
 class ClassAuxVAE(nn.Module):
@@ -149,6 +176,9 @@ class ClassAuxVAE(nn.Module):
         return en_mu, en_logvar, de_mu, de_logvar, y
 
 
+# ============================================================================ #
+
+
 class VAE2(nn.Module):
 
     def __init__(self, input_dim, num_classes=10, latent_dim=20):
@@ -204,6 +234,9 @@ class VAE2(nn.Module):
         return en_mu, en_logvar, output
 
 
+# ============================================================================ #
+
+
 class VAE(nn.Module):
 
     def __init__(self, input_dim, num_classes=10, latent_dim=20):
@@ -250,6 +283,9 @@ class VAE(nn.Module):
         z = self.reparameterize(en_mu, en_logvar)
         output = self.decode(z)
         return en_mu, en_logvar, output
+
+
+# ============================================================================ #
 
 
 class SNNLModel(nn.Module):
@@ -321,6 +357,9 @@ class SNNLModel(nn.Module):
 
         ce_loss = F.cross_entropy(y_pred, y_target)
         return y_pred, ce_loss - alpha / x.size(0) * snn_loss
+
+
+# ============================================================================ #
 
 
 class HiddenMixupModel(nn.Module):
@@ -410,6 +449,9 @@ class HiddenMixupModel(nn.Module):
         mixed_x = lam * x + (1 - lam) * x[index, :]
         y_a, y_b = y, y[index]
         return mixed_x, y_a, y_b, lam
+
+
+# ============================================================================ #
 
 
 class Autoencoder(nn.Module):
