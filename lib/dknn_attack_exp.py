@@ -7,10 +7,10 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-INFTY = 1e20
+INFTY = 1e10
 
 
-class DKNNL2Attack(object):
+class DKNNExpAttack(object):
     """
     Implement gradient-based attack on Deep k-Nearest Neigbhor that uses
     L-2 distance as a metric
@@ -19,7 +19,7 @@ class DKNNL2Attack(object):
     def __call__(self, dknn, x_orig, label, guide_layer='relu1', m=100,
                  binary_search_steps=5, max_iterations=500,
                  learning_rate=1e-2, initial_const=1, abort_early=True,
-                 max_linf=None, random_start=False, guide_mode=1):
+                 max_linf=None, random_start=False, guide_mode=1, thres=0, a=1):
         """
         Parameters
         ----------
@@ -79,6 +79,8 @@ class DKNNL2Attack(object):
         label = label.cpu().numpy()
         input_shape = x_orig.detach().cpu().numpy().shape
         device = dknn.device
+        self.a = a
+        self.thres = thres.to(device).view(batch_size, 1)
 
         def to_attack_space(x):
             # map from [min_, max_] to [-1, +1]
@@ -121,15 +123,8 @@ class DKNNL2Attack(object):
         with torch.no_grad():
 
             # choose guide samples and get their representations
-            if guide_mode == 1:
-                x_guide = self.find_guide_samples(
-                    dknn, x_orig, label, k=m, layer=guide_layer)
-            elif guide_mode == 2:
-                x_guide = self.find_guide_samples_v2(
-                    dknn, x_orig, label, k=m, layer=guide_layer)
-            else:
-                raise ValueError("Invalid guide_mode (choose between 1 and 2)")
-
+            x_guide, coeff = self.find_guide_samples(dknn, x_orig, label, k=m,
+                                                     layer=guide_layer)
             guide_reps = {}
             for i in range(batch_size):
                 guide_rep = dknn.get_activations(
@@ -160,18 +155,22 @@ class DKNNL2Attack(object):
             loss_at_previous_check = torch.zeros(1, device=device) + INFTY
 
             # create a new optimizer
-            # optimizer = optim.Adam([z_delta], lr=learning_rate)
+            optimizer = optim.Adam([z_delta], lr=learning_rate)
             # optimizer = optim.SGD([z_delta], lr=learning_rate)
-            optimizer = optim.RMSprop([z_delta], lr=learning_rate)
+            # optimizer = optim.RMSprop([z_delta], lr=learning_rate)
 
             for iteration in range(max_iterations):
                 optimizer.zero_grad()
                 x = to_model_space(z_orig + z_delta)
                 reps = dknn.get_activations(x, requires_grad=True)
                 loss, l2dist = self.loss_function(
-                    x, reps, guide_reps, dknn.layers, const, x_recon, device)
+                    x, reps, guide_reps, coeff, dknn.layers, const, x_recon, device)
                 loss.backward()
                 optimizer.step()
+
+                if iteration == 500:
+                    import pdb
+                    pdb.set_trace()
 
                 if iteration % (np.ceil(max_iterations / 10)) == 0:
                     print('    step: %d; loss: %.3f; l2dist: %.3f' %
@@ -182,15 +181,25 @@ class DKNNL2Attack(object):
                 #     print(z_delta.grad[i].view(-1).norm().item())
 
                 if abort_early and iteration % (np.ceil(max_iterations / 10)) == 0:
-                    # after each tenth of the iterations, check progress
-                    if torch.gt(loss, .9999 * loss_at_previous_check):
-                        break  # stop Adam if there has not been progress
-                    loss_at_previous_check = loss
+                    # # after each tenth of the iterations, check progress
+                    # if torch.gt(loss, .9999 * loss_at_previous_check):
+                    #     break  # stop Adam if there has not been progress
+                    # loss_at_previous_check = loss
+                    is_adv = self.check_adv(dknn, x, label)
+                    print(is_adv.sum())
+                    for i in range(batch_size):
+                        if is_adv[i] and best_l2dist[i] > l2dist[i]:
+                            x_adv[i] = x[i]
+                            best_l2dist[i] = l2dist[i]
 
             # check how many attacks have succeeded
             with torch.no_grad():
                 is_adv = self.check_adv(dknn, x, label)
                 print(is_adv.sum())
+
+            # if binary_search_step == 14:
+            #     import pdb
+            #     pdb.set_trace()
 
             for i in range(batch_size):
                 # set new upper and lower bounds
@@ -225,8 +234,30 @@ class DKNNL2Attack(object):
         y_pred = dknn.classify(x).argmax(1)
         return torch.tensor((y_pred != label).astype(np.float32)).to(dknn.device)
 
-    @classmethod
-    def loss_function(cls, x, reps, guide_reps, layers, const, x_recon, device):
+    # @classmethod
+    # def loss_function(cls, x, reps, guide_reps, coeff, layers, const, x_recon, device):
+    #     """Returns the loss averaged over the batch (first dimension of x) and
+    #     L-2 norm squared of the perturbation
+    #     """
+    #
+    #     batch_size = x.size(0)
+    #     adv_loss = torch.zeros((batch_size, len(layers)), device=device)
+    #     # find squared L-2 distance between original samples and their
+    #     # adversarial examples at each layer
+    #     for l, layer in enumerate(layers):
+    #         rep = reps[layer].view(batch_size, 1, -1)
+    #         adv_loss[:, l] = (
+    #             coeff.to(device) * ((rep - guide_reps[layer])**2).sum(2)).sum(1)
+    #     adv_loss = torch.max(torch.tensor(0., device=device), adv_loss)
+    #     # find L-2 norm squared of perturbation
+    #     l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
+    #     # total_loss is sum of squared perturbation norm and squared distance
+    #     # of representations, multiplied by constant
+    #     total_loss = l2dist + const * adv_loss.mean(1)
+    #
+    #     return total_loss.mean(), l2dist.sqrt()
+
+    def loss_function(self, x, reps, guide_reps, coeff, layers, const, x_recon, device):
         """Returns the loss averaged over the batch (first dimension of x) and
         L-2 norm squared of the perturbation
         """
@@ -237,7 +268,11 @@ class DKNNL2Attack(object):
         # adversarial examples at each layer
         for l, layer in enumerate(layers):
             rep = reps[layer].view(batch_size, 1, -1)
-            adv_loss[:, l] = ((rep - guide_reps[layer])**2).sum((1, 2))
+            dist = ((rep - guide_reps[layer])**2).sum(2)
+            fx = self.sigmoid(
+                (self.thres - dist).clamp(-30 / self.a, 30 / self.a), a=self.a)
+            Fx = (coeff.to(device) * fx).sum(1)
+            adv_loss[:, l] = torch.max(torch.tensor(-1., device=device), Fx)
         # find L-2 norm squared of perturbation
         l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
         # total_loss is sum of squared perturbation norm and squared distance
@@ -253,6 +288,12 @@ class DKNNL2Attack(object):
         """
         num_classes = dknn.num_classes
         nn = torch.zeros((k, ) + x.size()).transpose(0, 1)
+        coeff = torch.zeros((x.size(0), k))
+        # coeff[:, :k // 2] -= 1
+        # coeff[:, k // 2:] += 1
+        coeff[:, :k // 2] += 1
+        coeff[:, k // 2:] -= 1
+        # coeff += 1
         D, I = dknn.get_neighbors(
             x, k=dknn.x_train.size(0), layers=[layer])[0]
 
@@ -260,25 +301,17 @@ class DKNNL2Attack(object):
             mean_dist = np.zeros((num_classes, ))
             for j in range(num_classes):
                 mean_dist[j] = np.mean(
-                    d[np.where(dknn.y_train[ind] == j)[0]][:k])
+                    d[np.where(dknn.y_train[ind] == j)[0]][:k // 2])
             mean_dist[label[i]] += INFTY
             nearest_label = mean_dist.argmin()
-            nn_ind = np.where(dknn.y_train[ind] == nearest_label)[0][:k]
-            nn[i] = dknn.x_train[ind[nn_ind]]
+            nn_ind = np.where(dknn.y_train[ind] == nearest_label)[0][:k // 2]
+            nn[i, k // 2:] = dknn.x_train[ind[nn_ind]]
+            nn_ind = np.where(dknn.y_train[ind] == label[i])[0][:k // 2]
+            nn[i, :k // 2] = dknn.x_train[ind[nn_ind]]
+            # nn_ind = np.where(dknn.y_train[ind] == nearest_label)[0][:k]
+            # nn[i] = dknn.x_train[ind[nn_ind]]
 
-        return nn
-
-    @classmethod
-    def find_guide_samples_v2(cls, dknn, x, label, k=100, layer='relu1'):
-        """Find the nearest neighbor to <x> that has a different label from
-        <label>. Then find other <k> - 1 training samples that are closest to
-        the neighbor and has the same class
-        """
-        # find nearest sample with different class
-        nn = dknn.find_nn_diff_class(x, label)
-        # now find k neighbors that has the same class as x_nn
-        x_nn = cls.find_nn_same_class(dknn, nn, k=k, layer=layer)
-        return x_nn
+        return nn, coeff
 
     @staticmethod
     def find_nn_same_class(dknn, ind_x, k=100, layer='relu1'):

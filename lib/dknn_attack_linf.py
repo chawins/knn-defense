@@ -1,4 +1,4 @@
-'''Implement gradient-based attack on DkNN with L-2 constraint'''
+'''Implement gradient-based attack on DkNN with L-inf constraint'''
 
 import logging
 
@@ -10,10 +10,10 @@ import torch.optim as optim
 INFTY = 1e20
 
 
-class DKNNL2Attack(object):
+class DKNNLinfAttack(object):
     """
     Implement gradient-based attack on Deep k-Nearest Neigbhor that uses
-    L-2 distance as a metric
+    L-2 distance as a metric. Perturbation is constrained in an L-inf ball.
     """
 
     def __call__(self, dknn, x_orig, label, guide_layer='relu1', m=100,
@@ -116,7 +116,6 @@ class DKNNL2Attack(object):
         const += initial_const
         lower_bound = torch.zeros_like(const)
         upper_bound = torch.zeros_like(const) + INFTY
-        best_l2dist = torch.zeros_like(const) + INFTY
 
         with torch.no_grad():
 
@@ -144,12 +143,6 @@ class DKNNL2Attack(object):
                         m, -1).detach()
 
         for binary_search_step in range(binary_search_steps):
-            if (binary_search_step == binary_search_steps - 1 and
-                    binary_search_steps >= 10):
-                    # in the last binary search step, use the upper_bound instead
-                    # to ensure that unsuccessful attacks use the largest
-                    # possible constant
-                const = upper_bound
 
             if not random_start:
                 z_delta = torch.zeros_like(z_orig, requires_grad=True)
@@ -160,9 +153,8 @@ class DKNNL2Attack(object):
             loss_at_previous_check = torch.zeros(1, device=device) + INFTY
 
             # create a new optimizer
-            # optimizer = optim.Adam([z_delta], lr=learning_rate)
+            optimizer = optim.Adam([z_delta], lr=learning_rate)
             # optimizer = optim.SGD([z_delta], lr=learning_rate)
-            optimizer = optim.RMSprop([z_delta], lr=learning_rate)
 
             for iteration in range(max_iterations):
                 optimizer.zero_grad()
@@ -190,28 +182,27 @@ class DKNNL2Attack(object):
             # check how many attacks have succeeded
             with torch.no_grad():
                 is_adv = self.check_adv(dknn, x, label)
-                print(is_adv.sum())
 
             for i in range(batch_size):
                 # set new upper and lower bounds
-                if is_adv[i]:
-                    upper_bound[i] = const[i]
-                else:
+                if l2dist[i] > 0:
                     lower_bound[i] = const[i]
+                else:
+                    upper_bound[i] = const[i]
+                    if is_adv[i]:
+                        x_adv[i] = x[i]
                 # set new const
                 if upper_bound[i] == INFTY:
-                    # exponential search if adv has not been found
+                    # exponential search if adv has not satisfied the
+                    # constraint once
                     const[i] *= 10
+                elif lower_bound[i] == 0:
+                    const[i] /= 10
                 else:
                     # binary search if adv has been found
                     const[i] = (lower_bound[i] + upper_bound[i]) / 2
-                # only keep adv with smallest l2dist
-                if is_adv[i] and best_l2dist[i] > l2dist[i]:
-                    x_adv[i] = x[i]
-                    best_l2dist[i] = l2dist[i]
 
-            # check the current attack success rate (combined with previous
-            # binary search steps)
+            # check the current attack success rate
             with torch.no_grad():
                 is_adv = self.check_adv(dknn, x_adv, label)
             print('binary step: %d; number of successful adv: %d/%d' %
@@ -238,13 +229,14 @@ class DKNNL2Attack(object):
         for l, layer in enumerate(layers):
             rep = reps[layer].view(batch_size, 1, -1)
             adv_loss[:, l] = ((rep - guide_reps[layer])**2).sum((1, 2))
-        # find L-2 norm squared of perturbation
-        l2dist = torch.norm((x - x_recon).view(batch_size, -1), dim=1)**2
+        # find L-inf norm squared of perturbation
+        dist = torch.max(torch.zeros_like(x), torch.abs(x - x_recon) - 0.1)
+        dist = (dist**2).view(batch_size, -1).mean(1)
         # total_loss is sum of squared perturbation norm and squared distance
         # of representations, multiplied by constant
-        total_loss = l2dist + const * adv_loss.mean(1)
+        total_loss = const * dist + adv_loss.mean(1)
 
-        return total_loss.mean(), l2dist.sqrt()
+        return total_loss.mean(), dist.sqrt()
 
     @staticmethod
     def find_guide_samples(dknn, x, label, k=100, layer='relu1'):
