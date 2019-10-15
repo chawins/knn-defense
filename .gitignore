@@ -2,7 +2,7 @@
 .ipynb_checkpoints/
 .vscode
 *_tmp.py
-save*
+saved_models/archived/
 nohup*
 tmp*
 data/
