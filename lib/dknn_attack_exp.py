@@ -73,7 +73,9 @@ class DKNNExpAttack(object):
             are not found, return those inputs.
         """
 
-        min_, max_ = x_orig.min(), x_orig.max()
+        # min_, max_ = x_orig.min(), x_orig.max()
+        min_ = torch.tensor(0., device=self.device)
+        max_ = torch.tensor(1., device=self.device)
         if max_linf is not None:
             min_ = torch.max(x_orig - max_linf, min_)
             max_ = torch.min(x_orig + max_linf, max_)

@@ -3,6 +3,7 @@
 .vscode
 *_tmp.py
 saved_models/archived/
+saved_models/
 nohup*
 tmp*
 data/

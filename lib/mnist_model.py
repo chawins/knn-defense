@@ -508,3 +508,112 @@ class Autoencoder(nn.Module):
     def loss_function(self, latent, x_recon, inputs, targets):
         # MSE loss
         return torch.sum((inputs - x_recon) ** 2)
+
+
+# ============================================================================ #
+
+
+class NCAModel(nn.Module):
+
+    def __init__(self, output_dim=100, init_it=1e-2, train_it=False):
+        super(NCAModel, self).__init__()
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=8, stride=2, padding=3)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=6, stride=2, padding=3)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv3 = nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=0)
+        self.relu3 = nn.ReLU(inplace=True)
+        self.fc = nn.Linear(2048, output_dim)
+
+        # initialize inverse temperature for each layer
+        self.log_it = torch.nn.Parameter(
+            data=torch.tensor(np.log(init_it)), requires_grad=train_it)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.conv3(x)
+        x = self.relu3(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+    def forward_adv(self, x, y_target, step_size, num_steps, rand):
+        """
+        """
+        # training samples that we want to query against should not be perturbed
+        # so we keep an extra copy and detach it from gradient computation
+        outputs_orig = self.forward(x)
+
+        x = x.detach()
+        if rand:
+            # x = x + torch.zeros_like(x).uniform_(-self.epsilon, self.epsilon)
+            x = x + torch.zeros_like(x).normal_(0, step_size)
+
+        for _ in range(num_steps):
+            x.requires_grad_()
+            with torch.enable_grad():
+                outputs = self.forward(x)
+                p_target = self.get_prob(
+                    outputs, y_target, x_orig=outputs_orig.detach())
+                loss = - torch.log(p_target).sum()
+            grad = torch.autograd.grad(loss, x)[0].detach()
+            grad_norm = grad.view(x.size(0), -1).norm(2, 1)
+            delta = step_size * grad / grad_norm.view(x.size(0), 1, 1, 1)
+            x = x.detach() + delta
+            # x = torch.min(torch.max(x, inputs - self.epsilon),
+            #               inputs + self.epsilon)
+            x = torch.clamp(x, 0, 1)
+            # import pdb
+            # pdb.set_trace()
+
+        return outputs_orig, self.forward(x)
+
+    def get_prob(self, x, y_target, x_orig=None):
+        """
+        If x_orig is given, compute distance w.r.t. x_orig instead of samples
+        in the same batch (x). It is intended to be used with adversarial
+        training.
+        """
+        if x_orig is not None:
+            assert x.size(0) == x_orig.size(0)
+
+        batch_size = x.size(0)
+        p_target = torch.zeros(batch_size, device=x.device)
+
+        for i in range(batch_size):
+            mask_same = (y_target[i] == y_target).float()
+            mask_not_self = torch.ones(batch_size, device=x.device)
+            mask_not_self[i] = 0
+            if x_orig is not None:
+                dist = ((x[i] - x_orig) ** 2).view(batch_size, -1).sum(1) * \
+                    self.log_it.exp()
+            else:
+                dist = ((x[i] - x) ** 2).view(batch_size, -1).sum(1) * \
+                    self.log_it.exp()
+            # clip dist to prevent overflow
+            exp = torch.exp(- torch.min(dist, torch.tensor(50.).cuda()))
+            # exp = torch.exp(- dist)
+            p_target[i] = (torch.sum(mask_not_self * mask_same * exp) /
+                           torch.sum(mask_not_self * exp))
+            # import pdb
+            # pdb.set_trace()
+        return p_target
+
+    def loss_function(self, output, y_target, orig=None):
+        """soft nearest neighbor loss"""
+        p_target = self.get_prob(output, y_target, x_orig=orig)
+        # y_pred = p_target.max(1)
+        loss = - torch.log(p_target)
+        return loss.mean()
