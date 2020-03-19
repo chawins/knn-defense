@@ -1,4 +1,4 @@
-'''Train MNIST model with adversarial training'''
+'''Train DkNNB on MNIST'''
 from __future__ import print_function
 
 import logging
@@ -18,16 +18,20 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
-def evaluate(net, dataloader, criterion, device, adv=False):
+def loss_function(y_pred, y_train, y_knn):
+    pass
 
-    net.eval()
+
+def evaluate(net, dataloader, device):
+
+    dknnb.dknnb_net.eval()
     val_loss = 0
     val_correct = 0
     val_total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(dataloader):
-            inputs, targets = inputs.to(device), inputs.to(device)
-            outputs = net(inputs, targets, attack=adv)
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = net(inputs, targets, attack=adv, clip=True)
             loss = criterion(outputs, targets)
             val_loss += loss.item()
             _, predicted = outputs.max(1)
@@ -37,18 +41,18 @@ def evaluate(net, dataloader, criterion, device, adv=False):
     return val_loss / val_total, val_correct / val_total
 
 
-def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
-          log, save_best_only=True, best_loss=1e9, model_path='./model.pt'):
+def train(dknnb, trainloader, validloader, optimizer, epoch, device, log,
+          save_best_only=True, best_loss=1e9, model_path='./model.pt'):
 
-    net.train()
+    dknnb.dknnb_net.train()
     train_loss = 0
     train_correct = 0
     train_total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), inputs.to(device)
+        inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = net(inputs, targets, attack=True)
-        loss = criterion(outputs, targets)
+        outputs = net(inputs)
+        loss = loss_function(outputs, targets, y_knn)
         loss.backward()
         optimizer.step()
 
@@ -66,9 +70,12 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
              adv_loss, adv_acc, val_loss, val_acc)
 
     # Save model weights
-    if not save_best_only or (save_best_only and adv_loss < best_loss):
+    if not save_best_only:
         log.info('Saving model...')
-        torch.save(net.state_dict(), model_path)
+        torch.save(net.state_dict(), model_path + '_epoch%d.h5' % epoch)
+    elif save_best_only and adv_loss < best_loss:
+        log.info('Saving model...')
+        torch.save(net.state_dict(), model_path + '.h5')
         best_loss = adv_loss
     return best_loss
 
@@ -76,8 +83,13 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 5
-    model_name = 'adv_mnist_exp%d' % exp_id
+    exp_id = 0
+    dknnb_name = 'dknnb_mnist_exp%d' % exp_id
+
+    # Define baet network for DkNN
+    basenet_name = 'adv_mnist_exp20'
+    layers = ['fc']     # supports only one layer
+    k = 5
 
     # Training parameters
     batch_size = 128
@@ -85,10 +97,7 @@ def main():
     data_augmentation = False
     learning_rate = 1e-3
     l1_reg = 0
-    l2_reg = 1e-4
-
-    # Subtracting pixel mean improves accuracy
-    subtract_pixel_mean = False
+    l2_reg = 0
 
     # Set all random seeds
     seed = 2019
@@ -101,10 +110,11 @@ def main():
     save_dir = os.path.join(os.getcwd(), 'saved_models')
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
-    model_path = os.path.join(save_dir, model_name + '.h5')
+    model_path = os.path.join(save_dir, dknnb_name)
+    basenet_path = os.path.join(save_dir, basenet_name)
 
     # Get logger
-    log_file = model_name + '.log'
+    log_file = dknnb_name + '.log'
     log = logging.getLogger('train_mnist')
     log.setLevel(logging.DEBUG)
     # Create formatter and add it to the handlers
@@ -119,55 +129,56 @@ def main():
     log.info(log_file)
     log.info(('MNIST | exp_id: {}, seed: {}, init_learning_rate: {}, ' +
               'batch_size: {}, l2_reg: {}, l1_reg: {}, epochs: {}, ' +
-              'data_augmentation: {}, subtract_pixel_mean: {}').format(
+              'data_augmentation: {}').format(
                   exp_id, seed, learning_rate, batch_size, l2_reg, l1_reg,
-                  epochs, data_augmentation, subtract_pixel_mean))
+                  epochs, data_augmentation))
+
+    log.info('Loading base network...')
+    # Load the base network that produces embeddings
+    base_net = BasicModel()
+    base_net.load_state_dict(torch.load(basenet_path))
+    base_net = base_net.to(device)
+    base_net.eval()
 
     log.info('Preparing data...')
-    trainloader, validloader, testloader = load_mnist(
-        batch_size, data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
+    (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_mnist_all(
+        data_dir='/data', val_size=0.1, shuffle=True, seed=seed)
+    dknn = DkNNL2(base_net, x_train, y_train, x_val[:500], y_val[:500], layers,
+                  k=k, num_classes=10, device='cuda')
+
+    y_train_dknn = dknn.classify(x_train)
+    y_val_dknn = dknn.classify(x_val)
+    y_test_dknn = dknn.classify(x_test)
+
+    trainset = torch.utils.data.TensorDataset(x_train, (y_train, y_train_dknn))
+    validset = torch.utils.data.TensorDataset(x_val, (y_val, y_val_dknn))
+    testset = torch.utils.data.TensorDataset(x_test, (y_test, y_test_dknn))
+    num_workers = 4
+    trainloader = torch.utils.data.DataLoader(
+        trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    validloader = torch.utils.data.DataLoader(
+        validset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    testloader = torch.utils.data.DataLoader(
+        testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     log.info('Building model...')
-    basic_net = BasicModel()
-    # basic_net = BasicModelV2()
-    basic_net = basic_net.to(device)
+    dknnb_net = DkNNBModel()
+    dknnb_net = dknnb_net.to(device)
+    dknnb = DkNNB(base_net, dknnb_net)
 
-    # config = {'epsilon': 0.3,
-    #           'num_steps': 40,
-    #           'step_size': 0.01,
-    #           'random_start': True,
-    #           'loss_func': 'xent'}
-    # net = PGDModel(basic_net, config)
-    config = {'num_steps': 40,
-              'step_size': 0.1,
-              'random_start': True,
-              'loss_func': 'xent'}
-    net = PGDL2Model(basic_net, config)
+    optimizer = optim.Adam(dknnb_net.parameters(), lr=learning_rate)
 
-    net = net.to(device)
-    # if device == 'cuda':
-    #     net = torch.nn.DataParallel(net)
-    #     cudnn.benchmark = True
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(net.parameters(), lr=learning_rate)
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, [40, 50, 60], gamma=0.1)
-
-    log.info(' epoch | loss  , acc    | adv_l , adv_a  | val_l , val_a |')
+    log.info(' epoch | loss  , acc    | val_l , val_a  |')
     best_loss = 1e9
+
     for epoch in range(epochs):
-        lr_scheduler.step()
-        best_loss = train(net, trainloader, validloader, criterion, optimizer,
-                          epoch, device, log, save_best_only=True,
+
+        best_loss = train(dknnb, trainloader, validloader, optimizer, epoch,
+                          device, log, save_best_only=True,
                           best_loss=best_loss, model_path=model_path)
 
-    test_loss, test_acc = evaluate(
-        net, testloader, criterion, device, adv=False)
+    test_loss, test_acc = evaluate(dknnb, testloader, device)
     log.info('Test loss: %.4f, Test acc: %.4f', test_loss, test_acc)
-    test_loss, test_acc = evaluate(
-        net, testloader, criterion, device, adv=True)
-    log.info('Test adv loss: %.4f, Test adv acc: %.4f', test_loss, test_acc)
 
 
 if __name__ == '__main__':

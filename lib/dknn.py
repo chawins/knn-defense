@@ -1,7 +1,8 @@
 '''
-Define multiple Deep k-Nearest Neighbor objects
+Define Deep k-Nearest Neighbor object
 '''
 import numpy as np
+import torch.nn.functional as F
 
 import faiss
 from lib.faiss_utils import *
@@ -10,11 +11,11 @@ from lib.faiss_utils import *
 class DKNNL2(object):
     """
     An object that we use to create and store a deep k-nearest neighbor (DkNN)
-    that uses Euclidean distance as a metric
+    that uses Euclidean distance as a metric.
     """
 
     def __init__(self, model, x_train, y_train, x_cal, y_cal, layers, k=75,
-                 num_classes=10, device='cuda'):
+                 num_classes=10, ys_train=None, cosine=False, device='cuda'):
         """
         Parameters
         ----------
@@ -38,12 +39,20 @@ class DKNNL2(object):
             (default is 75)
         num_classes : int, optional
             the number of classes (default is 10)
+        ys_train : torch.tensor, optional
+            specify soft labels for training samples. Must have shape
+            (num_train_samples, num_classes). (default is None)
+        cosine : bool, optional
+            If True, use cosine distance. Else use Euclidean distance.
+            (default is False)
         device : str, optional
             name of the device model is on (default is 'cuda')
         """
         self.model = model
+        self.cosine = cosine
         self.x_train = x_train
         self.y_train = y_train
+        self.ys_train = ys_train
         self.layers = layers
         self.k = k
         self.num_classes = num_classes
@@ -63,10 +72,8 @@ class DKNNL2(object):
         reps = self.get_activations(x_train, requires_grad=False)
 
         for layer in layers:
-            # flatten activation at each layer
-            rep = reps[layer].cpu().view(x_train.size(0), -1)
             # build faiss index from the activations by layer
-            index = self._build_index(rep)
+            index = self._build_index(reps[layer].cpu())
             self.indices.append(index)
 
         # set up calibration for credibility score
@@ -149,8 +156,8 @@ class DKNNL2(object):
             activations = {}
             self.model(x[0:1].to(device))
             for layer in self.layers:
-                size = self.activations[layer].size()
-                activations[layer] = torch.empty((num_total, ) + size[1:],
+                size = torch.tensor(self.activations[layer].size()[1:]).prod()
+                activations[layer] = torch.empty((num_total, size),
                                                  dtype=torch.float32,
                                                  device=device,
                                                  requires_grad=False)
@@ -164,7 +171,12 @@ class DKNNL2(object):
                 # copy the extracted activations to the dictionary of
                 # tensor allocated earlier
                 for layer in self.layers:
-                    activations[layer][begin:end] = self.activations[layer]
+                    act = self.activations[layer]
+                    act = act.view(act.size(0), -1)
+                    if self.cosine:
+                        act = F.normalize(act, 2, 1)
+                    activations[layer][begin:end] = act
+
             return activations
 
     def get_neighbors(self, x, k=None, layers=None):
@@ -193,8 +205,7 @@ class DKNNL2(object):
         reps = self.get_activations(x, requires_grad=False)
         for layer, index in zip(self.layers, self.indices):
             if layer in layers:
-                rep = reps[layer].view(x.size(0), -1)
-                rep = rep.detach().cpu().numpy()
+                rep = reps[layer].detach().cpu().numpy()
                 D, I = index.search(rep, k)
                 # D, I = search_index_pytorch(index, reps[layer], k)
                 # uncomment when using GPU
@@ -202,13 +213,15 @@ class DKNNL2(object):
                 output.append((D, I))
         return output
 
-    def classify(self, x):
+    def classify(self, x, k=None):
         """Find number of k-nearest neighbors in each class
 
         Arguments
         ---------
         x : torch.tensor
             samples to query, shape is (num_samples, ) + input_shape
+        k : int, optional
+            number of neighbors to check (Default is None)
 
         Returns
         -------
@@ -216,7 +229,7 @@ class DKNNL2(object):
             array of numbers of neighbors in each class, shape is
             (num_samples, self.num_classes)
         """
-        nb = self.get_neighbors(x)
+        nb = self.get_neighbors(x, k=k)
         class_counts = np.zeros((x.size(0), self.num_classes))
         for (_, I) in nb:
             y_pred = self.y_train.cpu().numpy()[I]
@@ -225,49 +238,72 @@ class DKNNL2(object):
                     y_pred[i], minlength=self.num_classes)
         return class_counts
 
+    def classify_soft(self, x, k=None):
+        """Use soft lable for classification
+
+        Arguments
+        ---------
+        x : torch.tensor
+            samples to query, shape is (num_samples, ) + input_shape
+        k : int, optional
+            number of neighbors to check (Default is None)
+
+        Returns
+        -------
+        class_counts : np.array
+            array of numbers of neighbors in each class, shape is
+            (num_samples, self.num_classes)
+        """
+        nb = self.get_neighbors(x, k=k)
+        ys = np.zeros((x.size(0), self.num_classes))
+        for (_, I) in nb:
+            for i in range(x.size(0)):
+                ys[i] += self.ys_train.cpu().numpy()[I[i]].mean(0)
+        return ys
+
     def predict(self, x):
         """Predict label of single sample x"""
         return self.classify(x.unsqueeze(0))[0].argmax()
 
-    def classify_soft(self, x, layer=None, k=None):
-        """(Deprecated) Find average of exponential of distance from the query
-        points to neighbors of each class.
-
-        Parameters
-        ----------
-        x : torch.tensor
-            samples to query, shape (num_samples, ) + input_shape
-        k : int, optional
-            number of neighbors (Default is self.k)
-        layers : list of str
-            list of layer names to find neighbors on (Default is self.layers)
-
-        Returns
-        -------
-        logits : np.array
-            array of average of exponential of distance to neighbors in each
-            class, shape is (num_samples, self.num_classes)
-        """
-        temp = 2e-2
-        if layer is None:
-            layer = self.layers[-1]
-        if k is None:
-            k = self.k
-        with torch.no_grad():
-            train_reps = self.get_activations(self.x_train)[layer]
-            train_reps = train_reps.view(self.x_train.size(0), -1)
-            reps = self.get_activations(x)[layer]
-            reps = reps.view(x.size(0), -1)
-            logits = torch.empty((x.size(0), self.num_classes))
-            for i, rep in enumerate(reps):
-                dist = (((rep.view(1, -1) - train_reps)**2).sum(1) / temp).exp()
-                # cos = ((rep.unsqueeze(0) * train_reps).sum(1) / temp).exp()
-                # cos = (rep.unsqueeze(0) * train_reps).sum(1)
-                for label in range(self.num_classes):
-                    logits[i, label] = dist[self.y_train == label].mean()
-                    # ind = self.y_train == label
-                    # logits[i, label] = cos[ind].topk(k)[0].mean()
-            return logits
+    # def classify_soft(self, x, layer=None, k=None):
+    #     """(Deprecated) Find average of exponential of distance from the query
+    #     points to neighbors of each class.
+    #
+    #     Parameters
+    #     ----------
+    #     x : torch.tensor
+    #         samples to query, shape (num_samples, ) + input_shape
+    #     k : int, optional
+    #         number of neighbors (Default is self.k)
+    #     layers : list of str
+    #         list of layer names to find neighbors on (Default is self.layers)
+    #
+    #     Returns
+    #     -------
+    #     logits : np.array
+    #         array of average of exponential of distance to neighbors in each
+    #         class, shape is (num_samples, self.num_classes)
+    #     """
+    #     temp = 2e-2
+    #     if layer is None:
+    #         layer = self.layers[-1]
+    #     if k is None:
+    #         k = self.k
+    #     with torch.no_grad():
+    #         train_reps = self.get_activations(self.x_train)[layer]
+    #         train_reps = train_reps.view(self.x_train.size(0), -1)
+    #         reps = self.get_activations(x)[layer]
+    #         reps = reps.view(x.size(0), -1)
+    #         logits = torch.empty((x.size(0), self.num_classes))
+    #         for i, rep in enumerate(reps):
+    #             dist = (((rep.view(1, -1) - train_reps)**2).sum(1) / temp).exp()
+    #             # cos = ((rep.unsqueeze(0) * train_reps).sum(1) / temp).exp()
+    #             # cos = (rep.unsqueeze(0) * train_reps).sum(1)
+    #             for label in range(self.num_classes):
+    #                 logits[i, label] = dist[self.y_train == label].mean()
+    #                 # ind = self.y_train == label
+    #                 # logits[i, label] = cos[ind].topk(k)[0].mean()
+    #         return logits
 
     def credibility(self, class_counts):
         """compute credibility of samples given their class_counts"""

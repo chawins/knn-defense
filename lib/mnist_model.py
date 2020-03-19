@@ -513,17 +513,23 @@ class Autoencoder(nn.Module):
 # ============================================================================ #
 
 
-class NCAModel(nn.Module):
+class NCAModelV3(nn.Module):
 
-    def __init__(self, output_dim=100, init_it=1e-2, train_it=False):
-        super(NCAModel, self).__init__()
+    def __init__(self, normalize=False, output_dim=100, num_classes=10,
+                 init_it=1e-2, train_it=False, train_data=None):
+        super(NCAModelV3, self).__init__()
+        self.normalize = normalize
+        self.output_dim = output_dim
+        self.num_classes = num_classes
         self.conv1 = nn.Conv2d(1, 64, kernel_size=8, stride=2, padding=3)
         self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=6, stride=2, padding=3)
         self.relu2 = nn.ReLU(inplace=True)
         self.conv3 = nn.Conv2d(128, 128, kernel_size=5, stride=1, padding=0)
         self.relu3 = nn.ReLU(inplace=True)
-        self.fc = nn.Linear(2048, output_dim)
+        self.fc_ = nn.Linear(2048, output_dim)
+        # self.fc = nn.Identity()
+        self.fc = nn.Sigmoid()
 
         # initialize inverse temperature for each layer
         self.log_it = torch.nn.Parameter(
@@ -537,6 +543,9 @@ class NCAModel(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        self.train_data = train_data
+        self.train_rep = None
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.relu1(x)
@@ -545,38 +554,44 @@ class NCAModel(nn.Module):
         x = self.conv3(x)
         x = self.relu3(x)
         x = x.view(x.size(0), -1)
+        x = self.fc_(x)
+        if self.normalize:
+            x = F.normalize(x, p=2, dim=1)
         x = self.fc(x)
-
         return x
 
-    def forward_adv(self, x, y_target, step_size, num_steps, rand):
+    def forward_adv(self, x_orig, y_target, params):
         """
         """
+        epsilon = params['epsilon']
+        step_size = params['step_size']
+        num_steps = params['num_steps']
+        rand = params['random_start']
+
         # training samples that we want to query against should not be perturbed
         # so we keep an extra copy and detach it from gradient computation
-        outputs_orig = self.forward(x)
+        with torch.no_grad():
+            outputs_orig = self.forward(x_orig).detach()
 
-        x = x.detach()
+        x = x_orig.clone()
         if rand:
-            # x = x + torch.zeros_like(x).uniform_(-self.epsilon, self.epsilon)
-            x = x + torch.zeros_like(x).normal_(0, step_size)
+            noise = torch.zeros_like(x).normal_(0, 1).view(x.size(0), -1)
+            x += noise.renorm(2, 0, epsilon).view(x.size())
 
         for _ in range(num_steps):
             x.requires_grad_()
             with torch.enable_grad():
                 outputs = self.forward(x)
                 p_target = self.get_prob(
-                    outputs, y_target, x_orig=outputs_orig.detach())
+                    outputs, y_target, x_orig=outputs_orig)
                 loss = - torch.log(p_target).sum()
             grad = torch.autograd.grad(loss, x)[0].detach()
-            grad_norm = grad.view(x.size(0), -1).norm(2, 1)
+            grad_norm = grad.view(x.size(0), -1).norm(2, 1).clamp(1e-5, 1e9)
             delta = step_size * grad / grad_norm.view(x.size(0), 1, 1, 1)
             x = x.detach() + delta
-            # x = torch.min(torch.max(x, inputs - self.epsilon),
-            #               inputs + self.epsilon)
-            x = torch.clamp(x, 0, 1)
-            # import pdb
-            # pdb.set_trace()
+            diff = (x - x_orig).view(x.size(0), -1).renorm(2, 0, epsilon)
+            x = diff.view(x.size()) + x_orig
+            x.clamp_(0, 1)
 
         return outputs_orig, self.forward(x)
 
@@ -590,25 +605,25 @@ class NCAModel(nn.Module):
             assert x.size(0) == x_orig.size(0)
 
         batch_size = x.size(0)
-        p_target = torch.zeros(batch_size, device=x.device)
+        device = x.device
+        x = x.view(batch_size, -1)
+        if x_orig is not None:
+            x_orig = x_orig.view(batch_size, -1)
+            x_repeat = x_orig.repeat(batch_size, 1, 1).transpose(0, 1)
+        else:
+            x_repeat = x.repeat(batch_size, 1, 1).transpose(0, 1)
+        dist = ((x_repeat - x) ** 2).sum(2) * self.log_it.exp()
+        exp = torch.exp(- dist.clamp(- 50, 50))
+        mask_not_self = 1 - torch.eye(batch_size, device=device)
+        mask_same = (y_target.repeat(batch_size, 1).transpose(0, 1) ==
+                     y_target).float()
+        p_target = ((mask_not_self * mask_same * exp).sum(0) /
+                    (mask_not_self * exp).sum(0))
+        # p_target = (mask_same * exp).sum(0) / exp.sum(0)
+        # Prevent the case where there's only one sample in the batch from a
+        # certain clss, resulting in p_target being 0
+        p_target = torch.max(p_target, torch.tensor(1e-30).to(device))
 
-        for i in range(batch_size):
-            mask_same = (y_target[i] == y_target).float()
-            mask_not_self = torch.ones(batch_size, device=x.device)
-            mask_not_self[i] = 0
-            if x_orig is not None:
-                dist = ((x[i] - x_orig) ** 2).view(batch_size, -1).sum(1) * \
-                    self.log_it.exp()
-            else:
-                dist = ((x[i] - x) ** 2).view(batch_size, -1).sum(1) * \
-                    self.log_it.exp()
-            # clip dist to prevent overflow
-            exp = torch.exp(- torch.min(dist, torch.tensor(50.).cuda()))
-            # exp = torch.exp(- dist)
-            p_target[i] = (torch.sum(mask_not_self * mask_same * exp) /
-                           torch.sum(mask_not_self * exp))
-            # import pdb
-            # pdb.set_trace()
         return p_target
 
     def loss_function(self, output, y_target, orig=None):
@@ -617,3 +632,186 @@ class NCAModel(nn.Module):
         # y_pred = p_target.max(1)
         loss = - torch.log(p_target)
         return loss.mean()
+
+    # def loss_function(self, x, y_target, orig=None):
+    #     """"""
+    #     x_orig = orig
+    #     if x_orig is not None:
+    #         assert x.size(0) == x_orig.size(0)
+    #
+    #     batch_size = x.size(0)
+    #     device = x.device
+    #     x = x.view(batch_size, -1)
+    #     if x_orig is not None:
+    #         x_orig = x_orig.view(batch_size, -1)
+    #         x_repeat = x_orig.repeat(batch_size, 1, 1).transpose(0, 1)
+    #     else:
+    #         x_repeat = x.repeat(batch_size, 1, 1).transpose(0, 1)
+    #     dist = ((x_repeat - x) ** 2).sum(2)
+    #     mask_same = (y_target.repeat(batch_size, 1).transpose(0, 1) ==
+    #                  y_target).float()
+    #     # (1) fixed distance
+    #     # (2) pick k-th NN distance
+    #     dist_k = torch.topk(
+    #         dist, 10, largest=False, dim=0)[0][-1, :].unsqueeze(0).detach()
+    #     loss = (F.relu(1 + dist - dist_k) * mask_same).sum(0)
+    #     loss += (F.relu(1 - dist + dist_k) * (1 - mask_same)).sum(0)
+    #     # (3) all pairs
+    #     # (4) take mean
+    #     # dist_same = (dist * mask_same).sum(0) / mask_same.sum(0)
+    #     # dist_diff = (dist * (1 - mask_same)).sum(0) / \
+    #     #     (batch_size - mask_same.sum(0))
+    #     # loss = F.relu(1 + dist_same - dist_diff)
+    #
+    #     return loss.mean()
+
+    def get_train_rep(self, batch_size=200, requires_grad=False):
+        """update self.train_rep by running it through the current model"""
+        if self.train_data is None:
+            raise ValueError(
+                'Cannot compute train rep as train data is not provided.')
+        x_train, _ = self.train_data
+        device = self._get_device()
+        train_rep = torch.zeros((x_train.size(0), self.output_dim),
+                                device=device, requires_grad=requires_grad)
+        num_batches = np.ceil(x_train.size(0) // batch_size).astype(np.int32)
+        with torch.set_grad_enabled(requires_grad):
+            for i in range(num_batches):
+                start = i * batch_size
+                end = (i + 1) * batch_size
+                train_rep[start:end] = self.forward(
+                    x_train[start:end].to(device))
+        return train_rep
+
+    def recompute_train_rep(self):
+        self.train_rep = self.get_train_rep(requires_grad=False)
+
+    def compute_logits(self, x, recompute_train_rep=False, requires_grad=False,
+                       from_outputs=False):
+
+        if recompute_train_rep:
+            self.recompute_train_rep()
+        _, y_train = self.train_data
+        device = self._get_device()
+        # logits = torch.zeros((x.size(0), self.num_classes), device=x.device,
+        #                      requires_grad=requires_grad)
+        logits = []
+        with torch.set_grad_enabled(requires_grad):
+            if not from_outputs:
+                rep = self.forward(x.to(device))
+            else:
+                rep = x
+            dist = ((self.train_rep - rep.unsqueeze(1)) ** 2).sum(2)
+            exp = torch.exp(- dist.clamp(- 50, 50) * self.log_it.exp())
+            for j in range(self.num_classes):
+                mask_j = (y_train == j).float().to(device)
+                logits.append(
+                    ((mask_j * exp).sum(1) / exp.sum(1)).unsqueeze(-1))
+        return torch.cat(logits, dim=-1)
+
+    def _get_device(self):
+        return next(self.parameters()).device
+
+
+class WeightedNCA(NCAModelV3):
+    def __init__(self, normalize=False, output_dim=100, num_classes=10,
+                 init_it=1e-2, train_it=False, train_data=None):
+        super().__init__(normalize=normalize, output_dim=output_dim,
+                         num_classes=num_classes, init_it=init_it,
+                         train_it=train_it, train_data=train_data)
+        self.weights = torch.nn.Parameter(
+            data=torch.ones(len(self.train_data[0])), requires_grad=True)
+
+    def compute_logits(self, x, recompute_train_rep=False, requires_grad=False,
+                       from_outputs=False):
+
+        if recompute_train_rep:
+            self.recompute_train_rep()
+        _, y_train = self.train_data
+        device = self._get_device()
+        # logits = torch.zeros((x.size(0), self.num_classes), device=x.device,
+        #                      requires_grad=requires_grad)
+        logits = []
+        with torch.set_grad_enabled(requires_grad):
+            if not from_outputs:
+                rep = self.forward(x.to(device))
+            else:
+                rep = x
+            dist = ((self.train_rep - rep.unsqueeze(1)) ** 2).sum(2)
+            exp = torch.exp(- dist.clamp(- 50, 50) * self.log_it.exp())
+            exp *= self.weights.sigmoid()
+            for j in range(self.num_classes):
+                mask_j = (y_train == j).float().to(device)
+                logits.append(
+                    ((mask_j * exp).sum(1) / exp.sum(1)).unsqueeze(-1))
+        return torch.cat(logits, dim=-1)
+
+
+class SoftLabelNCA(NCAModelV3):
+    def __init__(self, ys_train, normalize=False, output_dim=100, num_classes=10,
+                 init_it=1e-2, train_it=False, train_data=None):
+        super().__init__(normalize=normalize, output_dim=output_dim,
+                         num_classes=num_classes, init_it=init_it,
+                         train_it=train_it, train_data=train_data)
+        self.ys_train = ys_train
+
+    def recompute_ys_train(self, k):
+        self.recompute_train_rep()
+        y_train = self.train_data[1]
+        for i in range(len(y_train)):
+            dist = ((self.train_rep[i] - self.train_rep) ** 2).sum(1)
+            nb = torch.topk(dist, k, largest=False)[1]
+            ys = np.bincount(
+                y_train[nb].numpy(), minlength=self.num_classes) / k
+            self.ys_train[i] = torch.tensor(ys, device='cuda').float()
+
+    # def get_prob(self, x, y_target, x_orig=None):
+    #     """
+    #     If x_orig is given, compute distance w.r.t. x_orig instead of samples
+    #     in the same batch (x). It is intended to be used with adversarial
+    #     training.
+    #     """
+    #     if x_orig is not None:
+    #         assert x.size(0) == x_orig.size(0)
+    #
+    #     batch_size = x.size(0)
+    #     device = x.device
+    #     x = x.view(batch_size, -1)
+    #     if x_orig is not None:
+    #         x_orig = x_orig.view(batch_size, -1)
+    #         x_repeat = x_orig.repeat(batch_size, 1, 1).transpose(0, 1)
+    #     else:
+    #         x_repeat = x.repeat(batch_size, 1, 1).transpose(0, 1)
+    #     dist = ((x_repeat - x) ** 2).sum(2) * self.log_it.exp()
+    #     exp = torch.exp(- dist.clamp(- 50, 50))
+    #     mask_same = (y_target.repeat(batch_size, 1).transpose(0, 1) ==
+    #                  y_target).float()
+    #     import pdb
+    #     pdb.set_trace()
+    #     p_target = (mask_same * (exp @ self.ys_train)).sum(0) / exp.sum(0)
+    #     # Prevent the case where there's only one sample in the batch from a
+    #     # certain clss, resulting in p_target being 0
+    #     p_target = torch.max(p_target, torch.tensor(1e-30).to(device))
+    #
+    #     return p_target
+
+    def compute_logits(self, x, recompute_train_rep=False, requires_grad=False,
+                       from_outputs=False):
+
+        if recompute_train_rep:
+            self.recompute_train_rep()
+        _, y_train = self.train_data
+        device = self._get_device()
+        # logits = torch.zeros((x.size(0), self.num_classes), device=x.device,
+        #                      requires_grad=requires_grad)
+        logits = []
+        with torch.set_grad_enabled(requires_grad):
+            if not from_outputs:
+                rep = self.forward(x.to(device))
+            else:
+                rep = x
+            dist = ((self.train_rep - rep.unsqueeze(1)) ** 2).sum(2)
+            exp = torch.exp(- (dist * self.log_it.exp()).clamp(- 50, 50))
+            probs = exp @ self.ys_train
+            logits = probs / exp.sum(1).unsqueeze(1)
+        return logits

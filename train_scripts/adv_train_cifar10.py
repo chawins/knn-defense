@@ -76,7 +76,7 @@ def train(net, trainloader, validloader, criterion, optimizer, epoch, device,
 def main():
 
     # Set experiment id
-    exp_id = 4
+    exp_id = 6
     model_name = 'adv_cifar10_exp%d' % exp_id
 
     # Training parameters
@@ -85,7 +85,7 @@ def main():
     data_augmentation = True
     learning_rate = 1e-3
     l1_reg = 0
-    l2_reg = 1e-4
+    l2_reg = 0
 
     # Subtracting pixel mean improves accuracy
     subtract_pixel_mean = False
@@ -142,16 +142,17 @@ def main():
     #           'random_start': True,
     #           'loss_func': 'xent'}
     # net = PGDModel(basic_net, config)
-    config = {'num_steps': 20,
-              'step_size': 0.05,
+    config = {'epsilon': 1,
+              'num_steps': 10,
+              'step_size': 0.2,
               'random_start': True,
               'loss_func': 'xent'}
     net = PGDL2Model(net, config)
 
     net = net.to(device)
-    # if device == 'cuda':
-    #     net = torch.nn.DataParallel(net)
-    #     cudnn.benchmark = True
+    if device == 'cuda':
+        # net = torch.nn.DataParallel(net)
+        cudnn.benchmark = True
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)
@@ -161,10 +162,10 @@ def main():
     log.info(' epoch | loss  , acc    | adv_l , adv_a  | val_l , val_a |')
     best_loss = 1e9
     for epoch in range(epochs):
-        lr_scheduler.step()
         best_loss = train(net, trainloader, validloader, criterion, optimizer,
                           epoch, device, log, save_best_only=True,
                           best_loss=best_loss, model_path=model_path)
+        lr_scheduler.step()
 
     test_loss, test_acc = evaluate(
         net, testloader, criterion, device, adv=False)
