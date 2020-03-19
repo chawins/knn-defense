@@ -1,4 +1,4 @@
-# Adversarial Examples on KNN (its neural network friends)
+# Adversarial Examples on KNN (and its neural network friends)
 This repo contains code for two very related papers:
 1. (Deprecated) Defending Against Adversarial Examples with K-Nearest Neighbor   
 https://arxiv.org/abs/1906.09525
